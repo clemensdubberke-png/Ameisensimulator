@@ -21,6 +21,12 @@
         // Steuerung
         TAP_THRESHOLD: 15, // Max Pixel-Bewegung fuer einen Tap (vs. Drag)
         MOVE_DEAD_ZONE: 10, // Mindest-Distanz bevor die Ameise sich bewegt
+        DOUBLE_TAP_DELAY: 350, // Max Millisekunden zwischen zwei Taps fuer Doppelklick
+        DOUBLE_TAP_RADIUS: 50, // Max Pixel-Abstand zwischen zwei Taps
+
+        // Graben
+        HOLE_SIZE: 96, // Anzeige-Groesse eines Lochs in Pixeln
+        DIG_DURATION: 60, // Frames die das Graben dauert (ca. 1 Sekunde bei 60fps)
 
         // Zoom-Stufe (1 = kein Zoom, 2 = doppelt so nah)
         ZOOM: 2,
@@ -49,6 +55,16 @@
             targetY: null,
             angle: 0, // Blickrichtung in Radiant
             moving: false,
+            digging: false, // Graebt gerade ein Loch
+            digTimer: 0, // Verbleibende Frames fuer Graben
+            digX: null, // Zielposition zum Graben
+            digY: null,
+        },
+        holes: [], // Array von {x, y} - gegrabene Loecher
+        doubleTap: {
+            lastTime: 0, // Zeitpunkt des letzten Taps
+            lastX: 0, // Welt-X des letzten Taps
+            lastY: 0, // Welt-Y des letzten Taps
         },
         touch: {
             active: false,
@@ -77,12 +93,14 @@
 
     async function loadAssets() {
         try {
-            const [grass, queen] = await Promise.all([
+            const [grass, queen, hole] = await Promise.all([
                 loadImage('assets/images/grass.png'),
                 loadImage('assets/images/queen.png'),
+                loadImage('assets/images/hole.png'),
             ]);
             state.images.grass = grass;
             state.images.queen = queen;
+            state.images.hole = hole;
             state.loaded = true;
             document.getElementById('loading').style.display = 'none';
         } catch (e) {
@@ -92,6 +110,7 @@
                 '<p style="font-size:14px;">Bitte stelle sicher, dass folgende Dateien vorhanden sind:</p>' +
                 '<p style="font-size:14px;margin-top:8px;color:#ffcc00;">assets/images/grass.png</p>' +
                 '<p style="font-size:14px;color:#ffcc00;">assets/images/queen.png</p>' +
+                '<p style="font-size:14px;color:#ffcc00;">assets/images/hole.png</p>' +
                 '</div>';
             console.error(e);
         }
@@ -112,6 +131,47 @@
         // Kamera-Grenzen
         state.camera.x = Math.max(0, Math.min(state.camera.x, CONFIG.WORLD_WIDTH - viewW));
         state.camera.y = Math.max(0, Math.min(state.camera.y, CONFIG.WORLD_HEIGHT - viewH));
+    }
+
+    // --- Tap-Verarbeitung (Einzelklick vs. Doppelklick) ---
+    function handleTap(worldX, worldY) {
+        const now = Date.now();
+        const dt = now - state.doubleTap.lastTime;
+        const dx = worldX - state.doubleTap.lastX;
+        const dy = worldY - state.doubleTap.lastY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dt < CONFIG.DOUBLE_TAP_DELAY && dist < CONFIG.DOUBLE_TAP_RADIUS) {
+            // Doppelklick erkannt -> Graben starten
+            state.doubleTap.lastTime = 0; // Reset damit kein Triple-Tap ausloest
+            startDigging(worldX, worldY);
+        } else {
+            // Einfacher Tap -> Ameise bewegen
+            state.doubleTap.lastTime = now;
+            state.doubleTap.lastX = worldX;
+            state.doubleTap.lastY = worldY;
+
+            state.queen.targetX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
+            state.queen.targetY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
+            state.queen.moving = true;
+            state.queen.digging = false;
+            state.queen.digX = null;
+            state.queen.digY = null;
+        }
+    }
+
+    function startDigging(worldX, worldY) {
+        const q = state.queen;
+        const clampedX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
+        const clampedY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
+
+        q.digX = clampedX;
+        q.digY = clampedY;
+        q.targetX = clampedX;
+        q.targetY = clampedY;
+        q.moving = true;
+        q.digging = true;
+        q.digTimer = CONFIG.DIG_DURATION;
     }
 
     // --- Touch-Steuerung ---
@@ -174,14 +234,11 @@
 
         const scaled = getScaledTouch(touch);
 
-        // Wenn es kein Drag war -> Tap = Bewegungsziel setzen
+        // Wenn es kein Drag war -> Tap verarbeiten (Einzel- oder Doppeltap)
         if (!state.touch.isDragging) {
             const worldX = scaled.x / CONFIG.ZOOM + state.camera.x;
             const worldY = scaled.y / CONFIG.ZOOM + state.camera.y;
-
-            state.queen.targetX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
-            state.queen.targetY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
-            state.queen.moving = true;
+            handleTap(worldX, worldY);
         }
 
         state.touch.active = false;
@@ -232,10 +289,7 @@
             const my = e.clientY * window.devicePixelRatio;
             const worldX = mx / CONFIG.ZOOM + state.camera.x;
             const worldY = my / CONFIG.ZOOM + state.camera.y;
-
-            state.queen.targetX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
-            state.queen.targetY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
-            state.queen.moving = true;
+            handleTap(worldX, worldY);
         }
         mouseDown = false;
         mouseDragging = false;
@@ -244,6 +298,20 @@
     // --- Spiellogik ---
     function updateQueen() {
         const q = state.queen;
+
+        // Grab-Timer laeuft: Ameise steht still und graebt
+        if (q.digging && q.digTimer > 0 && !q.moving) {
+            q.digTimer--;
+            if (q.digTimer <= 0) {
+                // Graben fertig -> Loch platzieren
+                state.holes.push({ x: q.digX, y: q.digY });
+                q.digging = false;
+                q.digX = null;
+                q.digY = null;
+            }
+            return;
+        }
+
         if (!q.moving || q.targetX === null || q.targetY === null) return;
 
         const dx = q.targetX - q.x;
@@ -254,6 +322,10 @@
             q.moving = false;
             q.targetX = null;
             q.targetY = null;
+            // Wenn Grab-Auftrag aktiv, Timer starten
+            if (q.digging) {
+                q.digTimer = CONFIG.DIG_DURATION;
+            }
             return;
         }
 
@@ -291,6 +363,40 @@
                 ctx.drawImage(img, screenX, screenY, tileW, tileH);
             }
         }
+    }
+
+    function drawHoles() {
+        const img = state.images.hole;
+        if (!img) return;
+
+        const size = CONFIG.HOLE_SIZE;
+        for (let i = 0; i < state.holes.length; i++) {
+            const h = state.holes[i];
+            const screenX = h.x - state.camera.x;
+            const screenY = h.y - state.camera.y;
+            ctx.drawImage(img, screenX - size / 2, screenY - size / 2, size, size);
+        }
+    }
+
+    function drawDigIndicator() {
+        const q = state.queen;
+        if (!q.digging || q.digTimer <= 0 || q.moving) return;
+
+        // Fortschrittsanzeige ueber der Ameise
+        const screenX = q.x - state.camera.x;
+        const screenY = q.y - state.camera.y;
+        const progress = 1 - (q.digTimer / CONFIG.DIG_DURATION);
+        const barWidth = 40;
+        const barHeight = 5;
+
+        ctx.save();
+        // Hintergrund
+        ctx.fillStyle = '#333';
+        ctx.fillRect(screenX - barWidth / 2, screenY - CONFIG.QUEEN_SIZE / 2 - 12, barWidth, barHeight);
+        // Fortschritt
+        ctx.fillStyle = '#8B4513';
+        ctx.fillRect(screenX - barWidth / 2, screenY - CONFIG.QUEEN_SIZE / 2 - 12, barWidth * progress, barHeight);
+        ctx.restore();
     }
 
     function drawQueen() {
@@ -359,6 +465,18 @@
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(viewX, viewY, viewW, viewH);
 
+        // Loecher auf Minimap
+        ctx.globalAlpha = 0.8;
+        ctx.fillStyle = '#8B4513';
+        for (let i = 0; i < state.holes.length; i++) {
+            const h = state.holes[i];
+            const holeMapX = x + (h.x / CONFIG.WORLD_WIDTH) * mapW;
+            const holeMapY = y + (h.y / CONFIG.WORLD_HEIGHT) * mapH;
+            ctx.beginPath();
+            ctx.arc(holeMapX, holeMapY, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
         // Koenigin auf Minimap
         ctx.globalAlpha = 1;
         const queenMapX = x + (state.queen.x / CONFIG.WORLD_WIDTH) * mapW;
@@ -389,8 +507,10 @@
         ctx.save();
         ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
         drawGrass();
+        drawHoles();
         drawTargetMarker();
         drawQueen();
+        drawDigIndicator();
         ctx.restore();
 
         // Minimap ohne Zoom zeichnen
