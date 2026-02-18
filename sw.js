@@ -1,5 +1,5 @@
 // Service Worker fuer Offline-Funktionalitaet
-const CACHE_NAME = 'ameisensimulator-v2';
+const CACHE_NAME = 'ameisensimulator-v3';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
@@ -7,6 +7,7 @@ const ASSETS_TO_CACHE = [
     './manifest.json',
     './assets/images/grass.png',
     './assets/images/queen.png',
+    './assets/images/hole.png',
 ];
 
 // Installation: Alle Assets cachen
