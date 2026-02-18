@@ -21,6 +21,9 @@
         // Steuerung
         TAP_THRESHOLD: 15, // Max Pixel-Bewegung fuer einen Tap (vs. Drag)
         MOVE_DEAD_ZONE: 10, // Mindest-Distanz bevor die Ameise sich bewegt
+
+        // Zoom-Stufe (1 = kein Zoom, 2 = doppelt so nah)
+        ZOOM: 2,
     };
 
     // --- Canvas Setup ---
@@ -96,18 +99,19 @@
 
     // --- Kamera ---
     function updateCamera() {
-        const screenW = canvas.width;
-        const screenH = canvas.height;
+        // Sichtbarer Bereich in Welt-Koordinaten (kleiner bei hoeherem Zoom)
+        const viewW = canvas.width / CONFIG.ZOOM;
+        const viewH = canvas.height / CONFIG.ZOOM;
 
         // Kamera zentriert auf Koenigin, wenn kein Drag aktiv
         if (!state.touch.isDragging) {
-            state.camera.x = state.queen.x - screenW / 2;
-            state.camera.y = state.queen.y - screenH / 2;
+            state.camera.x = state.queen.x - viewW / 2;
+            state.camera.y = state.queen.y - viewH / 2;
         }
 
         // Kamera-Grenzen
-        state.camera.x = Math.max(0, Math.min(state.camera.x, CONFIG.WORLD_WIDTH - screenW));
-        state.camera.y = Math.max(0, Math.min(state.camera.y, CONFIG.WORLD_HEIGHT - screenH));
+        state.camera.x = Math.max(0, Math.min(state.camera.x, CONFIG.WORLD_WIDTH - viewW));
+        state.camera.y = Math.max(0, Math.min(state.camera.y, CONFIG.WORLD_HEIGHT - viewH));
     }
 
     // --- Touch-Steuerung ---
@@ -155,9 +159,9 @@
 
         if (dist > CONFIG.TAP_THRESHOLD) {
             state.touch.isDragging = true;
-            // Kamera verschieben (entgegengesetzte Richtung zum Finger)
-            state.camera.x = state.touch.cameraStartX - dx;
-            state.camera.y = state.touch.cameraStartY - dy;
+            // Kamera verschieben (entgegengesetzte Richtung zum Finger, Zoom beruecksichtigen)
+            state.camera.x = state.touch.cameraStartX - dx / CONFIG.ZOOM;
+            state.camera.y = state.touch.cameraStartY - dy / CONFIG.ZOOM;
         }
     }, { passive: false });
 
@@ -172,8 +176,8 @@
 
         // Wenn es kein Drag war -> Tap = Bewegungsziel setzen
         if (!state.touch.isDragging) {
-            const worldX = scaled.x + state.camera.x;
-            const worldY = scaled.y + state.camera.y;
+            const worldX = scaled.x / CONFIG.ZOOM + state.camera.x;
+            const worldY = scaled.y / CONFIG.ZOOM + state.camera.y;
 
             state.queen.targetX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
             state.queen.targetY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
@@ -217,8 +221,8 @@
 
         if (dist > CONFIG.TAP_THRESHOLD) {
             mouseDragging = true;
-            state.camera.x = mouseCamStartX - dx;
-            state.camera.y = mouseCamStartY - dy;
+            state.camera.x = mouseCamStartX - dx / CONFIG.ZOOM;
+            state.camera.y = mouseCamStartY - dy / CONFIG.ZOOM;
         }
     });
 
@@ -226,8 +230,8 @@
         if (!mouseDragging) {
             const mx = e.clientX * window.devicePixelRatio;
             const my = e.clientY * window.devicePixelRatio;
-            const worldX = mx + state.camera.x;
-            const worldY = my + state.camera.y;
+            const worldX = mx / CONFIG.ZOOM + state.camera.x;
+            const worldY = my / CONFIG.ZOOM + state.camera.y;
 
             state.queen.targetX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
             state.queen.targetY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
@@ -274,11 +278,11 @@
         const tileW = CONFIG.TILE_SIZE;
         const tileH = CONFIG.TILE_SIZE;
 
-        // Nur sichtbare Kacheln zeichnen
+        // Nur sichtbare Kacheln zeichnen (Sichtbereich durch Zoom begrenzt)
         const startCol = Math.floor(state.camera.x / tileW);
         const startRow = Math.floor(state.camera.y / tileH);
-        const endCol = Math.ceil((state.camera.x + canvas.width) / tileW);
-        const endRow = Math.ceil((state.camera.y + canvas.height) / tileH);
+        const endCol = Math.ceil((state.camera.x + canvas.width / CONFIG.ZOOM) / tileW);
+        const endRow = Math.ceil((state.camera.y + canvas.height / CONFIG.ZOOM) / tileH);
 
         for (let row = startRow; row <= endRow; row++) {
             for (let col = startCol; col <= endCol; col++) {
@@ -302,8 +306,8 @@
 
         ctx.save();
         ctx.translate(screenX, screenY);
-        // Rotation: Bild zeigt nach oben (-PI/2), daher Offset
-        ctx.rotate(q.angle + Math.PI / 2);
+        // Rotation: Bild zeigt nach rechts (0), daher kein Offset noetig
+        ctx.rotate(q.angle);
         ctx.drawImage(img, -size / 2, -size / 2, size, size);
         ctx.restore();
     }
@@ -347,8 +351,8 @@
         // Sichtbarer Bereich
         const viewX = x + (state.camera.x / CONFIG.WORLD_WIDTH) * mapW;
         const viewY = y + (state.camera.y / CONFIG.WORLD_HEIGHT) * mapH;
-        const viewW = (canvas.width / CONFIG.WORLD_WIDTH) * mapW;
-        const viewH = (canvas.height / CONFIG.WORLD_HEIGHT) * mapH;
+        const viewW = (canvas.width / CONFIG.ZOOM / CONFIG.WORLD_WIDTH) * mapW;
+        const viewH = (canvas.height / CONFIG.ZOOM / CONFIG.WORLD_HEIGHT) * mapH;
 
         ctx.globalAlpha = 0.3;
         ctx.fillStyle = '#ffffff';
@@ -379,9 +383,16 @@
 
         // Rendern
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Zoom anwenden fuer Spielwelt
+        ctx.save();
+        ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
         drawGrass();
         drawTargetMarker();
         drawQueen();
+        ctx.restore();
+
+        // Minimap ohne Zoom zeichnen
         drawMinimap();
 
         requestAnimationFrame(gameLoop);
