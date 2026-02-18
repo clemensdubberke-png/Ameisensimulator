@@ -13,7 +13,7 @@
 
         // Ameisenkoenigin
         QUEEN_SPEED: 3,
-        QUEEN_SIZE: 64, // Anzeige-Groesse der Koenigin in Pixeln
+        QUEEN_SIZE: 96, // Anzeige-Groesse der Koenigin in Pixeln
 
         // Gras-Kachel
         TILE_SIZE: 128, // Groesse einer Gras-Kachel

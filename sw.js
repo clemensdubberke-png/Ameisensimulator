@@ -1,5 +1,5 @@
 // Service Worker fuer Offline-Funktionalitaet
-const CACHE_NAME = 'ameisensimulator-v1';
+const CACHE_NAME = 'ameisensimulator-v2';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
@@ -16,6 +16,7 @@ self.addEventListener('install', (event) => {
             return cache.addAll(ASSETS_TO_CACHE);
         })
     );
+    // Sofort aktivieren, ohne auf alte Tabs zu warten
     self.skipWaiting();
 });
 
@@ -33,14 +34,11 @@ self.addEventListener('activate', (event) => {
     self.clients.claim();
 });
 
-// Fetch: Zuerst Cache, dann Netzwerk
+// Fetch: Zuerst Netzwerk, dann Cache (stellt sicher, dass Updates sofort ankommen)
 self.addEventListener('fetch', (event) => {
     event.respondWith(
-        caches.match(event.request).then((cachedResponse) => {
-            if (cachedResponse) {
-                return cachedResponse;
-            }
-            return fetch(event.request).then((response) => {
+        fetch(event.request)
+            .then((response) => {
                 // Gueltige Antworten in den Cache legen
                 if (response && response.status === 200 && response.type === 'basic') {
                     const responseToCache = response.clone();
@@ -49,7 +47,10 @@ self.addEventListener('fetch', (event) => {
                     });
                 }
                 return response;
-            });
-        })
+            })
+            .catch(() => {
+                // Netzwerk nicht verfuegbar -> aus Cache laden (Offline-Modus)
+                return caches.match(event.request);
+            })
     );
 });
