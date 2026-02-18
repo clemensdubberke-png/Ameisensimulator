@@ -298,7 +298,8 @@
         if (!img) return;
 
         const q = state.queen;
-        const size = CONFIG.QUEEN_SIZE;
+        const bodyLength = CONFIG.QUEEN_SIZE * 1.5; // Laenge (Kopf bis Hinterleib)
+        const bodyWidth = CONFIG.QUEEN_SIZE;         // Breite (seitlich)
 
         // Position auf dem Bildschirm
         const screenX = q.x - state.camera.x;
@@ -308,7 +309,7 @@
         ctx.translate(screenX, screenY);
         // Rotation: Bild zeigt nach rechts (0), daher kein Offset noetig
         ctx.rotate(q.angle);
-        ctx.drawImage(img, -size / 2, -size / 2, size, size);
+        ctx.drawImage(img, -bodyLength / 2, -bodyWidth / 2, bodyLength, bodyWidth);
         ctx.restore();
     }
 
