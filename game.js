@@ -73,7 +73,7 @@
             camX: 0, camY: 0,
             queenX: 1500, queenY: 162,  // Ameisenposition im Untergrund
             queenAngle: Math.PI / 2,
-            targetX: null, targetY: null,
+            path: [],                   // Wegpunkte fuer Bewegung: [{x,y}] (Wegfindung)
             moving: false,
             exitX: 1500, exitY: 100,    // Hoehleneingang-Position (tief in der Erde)
             goingToExit: false,
@@ -201,13 +201,129 @@
         return {x: bestX, y: bestY, dist: bestDist};
     }
 
+    // --- Wegfindung durch den Tunnel-Graphen (Dijkstra) ---
+    function findTunnelPath(fromX, fromY, toX, toY, tunnels) {
+        const SNAP_SQ = 100; // Knotenabgleich-Toleranz: (10 Welt-Pixel)^2
+
+        // --- Phase 1: Knoten sammeln ---
+        const nodes = []; // [{x, y}]
+        function getOrAddNode(x, y) {
+            for (let i = 0; i < nodes.length; i++) {
+                const ddx = nodes[i].x - x, ddy = nodes[i].y - y;
+                if (ddx * ddx + ddy * ddy < SNAP_SQ) return i;
+            }
+            nodes.push({x, y});
+            return nodes.length - 1;
+        }
+
+        const segEnds = []; // [i1, i2] fuer jedes Tunnel-Segment
+        for (const seg of tunnels) {
+            segEnds.push([getOrAddNode(seg.x1, seg.y1), getOrAddNode(seg.x2, seg.y2)]);
+        }
+        const startId = getOrAddNode(fromX, fromY);
+        const endId   = getOrAddNode(toX,   toY);
+
+        if (startId === endId) return [{x: nodes[endId].x, y: nodes[endId].y}];
+
+        // --- Phase 2: Adjazenzliste aufbauen ---
+        const adj = [];
+        for (let i = 0; i < nodes.length; i++) adj.push([]);
+
+        function addEdge(a, b) {
+            if (a === b) return;
+            const ddx = nodes[a].x - nodes[b].x, ddy = nodes[a].y - nodes[b].y;
+            const d = Math.sqrt(ddx * ddx + ddy * ddy);
+            if (d < 0.5) return;
+            adj[a].push({to: b, d});
+            adj[b].push({to: a, d});
+        }
+
+        // Kanten zwischen Segment-Endpunkten
+        for (const [i1, i2] of segEnds) addEdge(i1, i2);
+
+        // Knoten mit den Segmenten verbinden, auf denen er liegt
+        function connectToSegments(nodeId, px, py) {
+            for (let si = 0; si < tunnels.length; si++) {
+                const seg = tunnels[si];
+                const sdx = seg.x2 - seg.x1, sdy = seg.y2 - seg.y1;
+                const lenSq = sdx * sdx + sdy * sdy;
+                if (lenSq < 1) continue;
+                let t = ((px - seg.x1) * sdx + (py - seg.y1) * sdy) / lenSq;
+                t = Math.max(0, Math.min(1, t));
+                const cx = seg.x1 + t * sdx, cy = seg.y1 + t * sdy;
+                if ((px - cx) * (px - cx) + (py - cy) * (py - cy) > SNAP_SQ * 9) continue;
+                const [i1, i2] = segEnds[si];
+                addEdge(nodeId, i1);
+                addEdge(nodeId, i2);
+            }
+        }
+        connectToSegments(startId, fromX, fromY);
+        connectToSegments(endId,   toX,   toY);
+
+        // Direkte Kante wenn Start und Ziel auf demselben Segment liegen
+        for (let si = 0; si < tunnels.length; si++) {
+            const seg = tunnels[si];
+            const sdx = seg.x2 - seg.x1, sdy = seg.y2 - seg.y1;
+            const lenSq = sdx * sdx + sdy * sdy;
+            if (lenSq < 1) continue;
+            const check = (px, py) => {
+                let t = ((px - seg.x1) * sdx + (py - seg.y1) * sdy) / lenSq;
+                t = Math.max(0, Math.min(1, t));
+                const cx = seg.x1 + t * sdx, cy = seg.y1 + t * sdy;
+                return (px - cx) * (px - cx) + (py - cy) * (py - cy) <= SNAP_SQ * 9;
+            };
+            if (check(fromX, fromY) && check(toX, toY)) {
+                addEdge(startId, endId);
+                break;
+            }
+        }
+
+        // --- Phase 3: Dijkstra ---
+        const n = nodes.length;
+        const dists = new Array(n).fill(Infinity);
+        const prev  = new Array(n).fill(-1);
+        const done  = new Array(n).fill(false);
+        dists[startId] = 0;
+        const pq = [{id: startId, d: 0}];
+
+        while (pq.length > 0) {
+            let mi = 0;
+            for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i;
+            const {id: u} = pq[mi];
+            pq.splice(mi, 1);
+            if (done[u]) continue;
+            done[u] = true;
+            if (u === endId) break;
+            for (const {to, d: ed} of adj[u]) {
+                if (done[to]) continue;
+                const nd = dists[u] + ed;
+                if (nd < dists[to]) {
+                    dists[to] = nd;
+                    prev[to] = u;
+                    pq.push({id: to, d: nd});
+                }
+            }
+        }
+
+        if (dists[endId] === Infinity) return null; // kein Pfad gefunden
+
+        // --- Pfad rekonstruieren (ohne Startknoten) ---
+        const path = [];
+        let cur = endId;
+        while (cur !== -1 && cur !== startId) {
+            path.unshift({x: nodes[cur].x, y: nodes[cur].y});
+            cur = prev[cur];
+        }
+        return path.length > 0 ? path : [{x: toX, y: toY}];
+    }
+
     // --- Tap-Verarbeitung (Einzelklick vs. Doppelklick) ---
     function handleTap(worldX, worldY) {
         // Untergrund-Ansicht: Ameise steuern, Gaenge graben, Ausgang benutzen
         if (state.underground.active) {
             const u = state.underground;
 
-            // Ausgang antippen -> laufendes Graben abschliessen + nach oben gehen
+            // Ausgang antippen -> laufendes Graben abschliessen + Wegfindung zum Ausgang
             const dxExit = worldX - u.exitX;
             const dyExit = worldY - u.exitY;
             if (Math.sqrt(dxExit * dxExit + dyExit * dyExit) < 90) {
@@ -215,8 +331,9 @@
                     u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
                     u.currentDig = null;
                 }
-                u.targetX = u.exitX;
-                u.targetY = u.exitY + 15;
+                const exitTarget = {x: u.exitX, y: u.exitY + 15};
+                const exitPath = findTunnelPath(u.queenX, u.queenY, exitTarget.x, exitTarget.y, u.tunnels);
+                u.path = exitPath || [exitTarget];
                 u.moving = true;
                 u.goingToExit = true;
                 u.lastTapTime = 0;
@@ -231,21 +348,19 @@
             const tapDist = Math.sqrt(tapDx * tapDx + tapDy * tapDy);
 
             if (dt < CONFIG.DOUBLE_TAP_DELAY && tapDist < CONFIG.DOUBLE_TAP_RADIUS) {
-                // Doppelklick: laufendes Graben abschliessen, neues starten
+                // Doppelklick: laufendes Graben abschliessen, neues Graben in gerader Linie starten
                 if (u.currentDig) {
                     u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
                 }
-                u.lastTapTime = 0; // Reset, kein Triple-Tap
+                u.lastTapTime = 0;
                 const tx = Math.max(0, Math.min(worldX, CONFIG.UNDERGROUND_WIDTH));
                 const ty = Math.max(u.exitY, Math.min(worldY, CONFIG.UNDERGROUND_HEIGHT));
-                // Neues Graben startet an aktueller Ameisenposition
                 u.currentDig = {x1: u.queenX, y1: u.queenY};
-                u.targetX = tx;
-                u.targetY = ty;
+                u.path = [{x: tx, y: ty}]; // Graben: immer gerade Linie zum Ziel
                 u.moving = true;
                 u.goingToExit = false;
             } else {
-                // Einfacher Tap: laufendes Graben abschliessen + auf vorhandenem Gang bewegen
+                // Einfacher Tap: Wegfindung durch bestehende Gaenge
                 u.lastTapTime = now;
                 u.lastTapX = worldX;
                 u.lastTapY = worldY;
@@ -255,10 +370,12 @@
                 }
                 const cp = closestPointOnTunnels(worldX, worldY, u.tunnels);
                 if (cp.dist <= CONFIG.TUNNEL_RADIUS * 2.5) {
-                    u.targetX = cp.x;
-                    u.targetY = cp.y;
-                    u.moving = true;
-                    u.goingToExit = false;
+                    const newPath = findTunnelPath(u.queenX, u.queenY, cp.x, cp.y, u.tunnels);
+                    if (newPath) {
+                        u.path = newPath;
+                        u.moving = true;
+                        u.goingToExit = false;
+                    }
                 }
                 // Tap ausserhalb aller Gaenge: ignorieren
             }
@@ -511,8 +628,7 @@
                 u.queenX = u.exitX;
                 u.queenY = u.exitY + 62; // direkt unter dem Ausgangsoval
                 u.queenAngle = Math.PI / 2; // schaut nach unten
-                u.targetX = null;
-                u.targetY = null;
+                u.path = [];
                 u.moving = false;
                 u.goingToExit = false;
                 // Eingangs-Gang: senkrecht von Ausgangsoval bis zur Startposition der Ameise
@@ -547,24 +663,30 @@
     // --- Ameisen-Logik im Untergrund ---
     function updateUndergroundQueen() {
         const u = state.underground;
-        if (!u.moving || u.targetX === null) return;
+        if (!u.moving || u.path.length === 0) return;
 
-        const dx = u.targetX - u.queenX;
-        const dy = u.targetY - u.queenY;
+        const wp = u.path[0]; // aktueller Wegpunkt
+        const dx = wp.x - u.queenX;
+        const dy = wp.y - u.queenY;
         const dist = Math.sqrt(dx * dx + dy * dy);
 
         if (dist < CONFIG.MOVE_DEAD_ZONE) {
-            // Gegrabenen Gang abschliessen (Endpunkt = Zielposition)
-            if (u.currentDig) {
-                u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
-                u.currentDig = null;
-            }
-            u.moving = false;
-            u.targetX = null;
-            u.targetY = null;
-            if (u.goingToExit) {
-                u.goingToExit = false;
-                u.active = false; // Zurueck zur Oberflaechenansicht
+            // Auf Wegpunkt einrasten und zum naechsten weitergehen
+            u.queenX = wp.x;
+            u.queenY = wp.y;
+            u.path.shift();
+
+            if (u.path.length === 0) {
+                // Alle Wegpunkte abgearbeitet -> Ziel erreicht
+                if (u.currentDig) {
+                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                    u.currentDig = null;
+                }
+                u.moving = false;
+                if (u.goingToExit) {
+                    u.goingToExit = false;
+                    u.active = false; // Zurueck zur Oberflaechenansicht
+                }
             }
             return;
         }
