@@ -756,16 +756,6 @@
                 ctx.lineTo(seg.x2 - camX, seg.y2 - camY);
                 ctx.stroke();
             }
-            // Innere Mittellinie (subtiler Lichtschein – Gang wirkt tiefer)
-            ctx.strokeStyle = 'rgba(80, 40, 10, 0.4)';
-            ctx.lineWidth = r * 0.6;
-            for (let i = 0; i < allSegs.length; i++) {
-                const seg = allSegs[i];
-                ctx.beginPath();
-                ctx.moveTo(seg.x1 - camX, seg.y1 - camY);
-                ctx.lineTo(seg.x2 - camX, seg.y2 - camY);
-                ctx.stroke();
-            }
             ctx.restore();
         }
 
