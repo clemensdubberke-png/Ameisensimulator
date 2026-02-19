@@ -70,11 +70,11 @@
         underground: {
             active: false,
             camX: 0, camY: 0,
-            queenX: 1500, queenY: 88,   // Ameisenposition im Untergrund
+            queenX: 1500, queenY: 162,  // Ameisenposition im Untergrund
             queenAngle: Math.PI / 2,
             targetX: null, targetY: null,
             moving: false,
-            exitX: 1500, exitY: 26,     // Hoehleneingang-Position (Rasenkante)
+            exitX: 1500, exitY: 100,    // Hoehleneingang-Position (tief in der Erde)
             goingToExit: false,
         }, // Untergrund-Ansicht
         doubleTap: {
@@ -437,7 +437,7 @@
                 // Ausgang-X proportional zur Loch-Position auf der Oberflaeche
                 const exitX = q.x * (CONFIG.UNDERGROUND_WIDTH / CONFIG.WORLD_WIDTH);
                 u.exitX = Math.max(CONFIG.QUEEN_SIZE, Math.min(exitX, CONFIG.UNDERGROUND_WIDTH - CONFIG.QUEEN_SIZE));
-                u.exitY = 26; // Oval-Oberkante liegt bei y=2, flushig an der Rasenkante
+                u.exitY = 100; // tiefer in der Erdschicht als die Rasenkante
                 // Ameise startet knapp unterhalb des Hoehleneingangs (gerade eingetreten)
                 u.queenX = u.exitX;
                 u.queenY = u.exitY + 62; // direkt unter dem Ausgangsoval
