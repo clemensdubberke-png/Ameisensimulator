@@ -100,20 +100,23 @@
 
     async function loadAssets() {
         try {
-            const [grass, queen, hole, underground, underground_deep] = await Promise.all([
+            const [grass, queen, hole, underground] = await Promise.all([
                 loadImage('assets/images/grass.png'),
                 loadImage('assets/images/queen.png'),
                 loadImage('assets/images/hole.png'),
                 loadImage('assets/images/underground.png'),
-                loadImage('assets/images/underground_deep.png'),
             ]);
             state.images.grass = grass;
             state.images.queen = queen;
             state.images.hole = hole;
             state.images.underground = underground;
-            state.images.underground_deep = underground_deep;
             state.loaded = true;
             document.getElementById('loading').style.display = 'none';
+
+            // Optional: Tiefes Erdreich laden (wird benoetigt sobald underground_deep.png hochgeladen ist)
+            loadImage('assets/images/underground_deep.png')
+                .then(img => { state.images.underground_deep = img; })
+                .catch(() => { /* Datei noch nicht vorhanden - Untergrund zeigt nur den oberen Streifen */ });
         } catch (e) {
             document.getElementById('loading').innerHTML =
                 '<div style="text-align:center;padding:20px;">' +
