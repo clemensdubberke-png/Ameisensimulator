@@ -30,6 +30,11 @@
 
         // Zoom-Stufe (1 = kein Zoom, 2 = doppelt so nah)
         ZOOM: 2,
+
+        // Untergrund-Welt
+        UNDERGROUND_WIDTH: 3000,   // Breite der Untergrund-Welt in Pixeln
+        UNDERGROUND_HEIGHT: 3000,  // Tiefe der Untergrund-Welt in Pixeln
+        UNDERGROUND_TOP_HEIGHT: 350, // Hoehe des oberen Streifens (underground.png)
     };
 
     // --- Canvas Setup ---
@@ -62,7 +67,7 @@
             goingToHole: false, // Laeuft zu einem fertigen Loch um hineinzugehen
         },
         holes: [], // Array von {x, y} - gegrabene Loecher
-        underground: { active: false }, // Untergrund-Ansicht aktiv
+        underground: { active: false, camX: 0, camY: 0 }, // Untergrund-Ansicht
         doubleTap: {
             lastTime: 0, // Zeitpunkt des letzten Taps
             lastX: 0, // Welt-X des letzten Taps
@@ -95,16 +100,18 @@
 
     async function loadAssets() {
         try {
-            const [grass, queen, hole, underground] = await Promise.all([
+            const [grass, queen, hole, underground, underground_deep] = await Promise.all([
                 loadImage('assets/images/grass.png'),
                 loadImage('assets/images/queen.png'),
                 loadImage('assets/images/hole.png'),
                 loadImage('assets/images/underground.png'),
+                loadImage('assets/images/underground_deep.png'),
             ]);
             state.images.grass = grass;
             state.images.queen = queen;
             state.images.hole = hole;
             state.images.underground = underground;
+            state.images.underground_deep = underground_deep;
             state.loaded = true;
             document.getElementById('loading').style.display = 'none';
         } catch (e) {
@@ -227,8 +234,9 @@
         state.touch.currentX = scaled.x;
         state.touch.currentY = scaled.y;
         state.touch.isDragging = false;
-        state.touch.cameraStartX = state.camera.x;
-        state.touch.cameraStartY = state.camera.y;
+        // Je nach Ansicht den richtigen Kamera-Startpunkt merken
+        state.touch.cameraStartX = state.underground.active ? state.underground.camX : state.camera.x;
+        state.touch.cameraStartY = state.underground.active ? state.underground.camY : state.camera.y;
     }, { passive: false });
 
     canvas.addEventListener('touchmove', (e) => {
@@ -250,9 +258,13 @@
 
         if (dist > CONFIG.TAP_THRESHOLD) {
             state.touch.isDragging = true;
-            // Kamera verschieben (entgegengesetzte Richtung zum Finger, Zoom beruecksichtigen)
-            state.camera.x = state.touch.cameraStartX - dx / CONFIG.ZOOM;
-            state.camera.y = state.touch.cameraStartY - dy / CONFIG.ZOOM;
+            if (state.underground.active) {
+                state.underground.camX = state.touch.cameraStartX - dx / CONFIG.ZOOM;
+                state.underground.camY = state.touch.cameraStartY - dy / CONFIG.ZOOM;
+            } else {
+                state.camera.x = state.touch.cameraStartX - dx / CONFIG.ZOOM;
+                state.camera.y = state.touch.cameraStartY - dy / CONFIG.ZOOM;
+            }
         }
     }, { passive: false });
 
@@ -295,8 +307,8 @@
         mouseStartX = e.clientX * window.devicePixelRatio;
         mouseStartY = e.clientY * window.devicePixelRatio;
         mouseDragging = false;
-        mouseCamStartX = state.camera.x;
-        mouseCamStartY = state.camera.y;
+        mouseCamStartX = state.underground.active ? state.underground.camX : state.camera.x;
+        mouseCamStartY = state.underground.active ? state.underground.camY : state.camera.y;
     });
 
     canvas.addEventListener('mousemove', (e) => {
@@ -309,8 +321,13 @@
 
         if (dist > CONFIG.TAP_THRESHOLD) {
             mouseDragging = true;
-            state.camera.x = mouseCamStartX - dx / CONFIG.ZOOM;
-            state.camera.y = mouseCamStartY - dy / CONFIG.ZOOM;
+            if (state.underground.active) {
+                state.underground.camX = mouseCamStartX - dx / CONFIG.ZOOM;
+                state.underground.camY = mouseCamStartY - dy / CONFIG.ZOOM;
+            } else {
+                state.camera.x = mouseCamStartX - dx / CONFIG.ZOOM;
+                state.camera.y = mouseCamStartY - dy / CONFIG.ZOOM;
+            }
         }
     });
 
@@ -360,6 +377,10 @@
             // Wenn Ameise am Loch angekommen -> Untergrund-Ansicht aktivieren
             if (q.goingToHole) {
                 q.goingToHole = false;
+                // Kamera horizontal mittig starten, oben an der Oberflaechenkante
+                const viewW = canvas.width / CONFIG.ZOOM;
+                state.underground.camX = Math.max(0, (CONFIG.UNDERGROUND_WIDTH - viewW) / 2);
+                state.underground.camY = 0;
                 state.underground.active = true;
             }
             return;
@@ -474,13 +495,55 @@
         ctx.restore();
     }
 
+    function updateUndergroundCamera() {
+        const u = state.underground;
+        const viewW = canvas.width / CONFIG.ZOOM;
+        const viewH = canvas.height / CONFIG.ZOOM;
+        u.camX = Math.max(0, Math.min(u.camX, CONFIG.UNDERGROUND_WIDTH - viewW));
+        u.camY = Math.max(0, Math.min(u.camY, CONFIG.UNDERGROUND_HEIGHT - viewH));
+    }
+
     function drawUnderground() {
-        const img = state.images.underground;
-        if (!img) return;
+        const topImg = state.images.underground;
+        const soilImg = state.images.underground_deep;
+        const camX = state.underground.camX;
+        const camY = state.underground.camY;
+        const worldW = CONFIG.UNDERGROUND_WIDTH;
+        const topH = CONFIG.UNDERGROUND_TOP_HEIGHT;
 
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
 
-        // Hinweis zum Verlassen
+        // Oberer Streifen: underground.png gestreckt auf volle Weltbreite
+        if (topImg) {
+            ctx.drawImage(topImg, -camX, -camY, worldW, topH);
+        }
+
+        // Darunter: underground_deep.png als Kachelwerk fuer die Tiefe
+        if (soilImg && soilImg.width > 0 && soilImg.height > 0) {
+            const tileW = soilImg.width;
+            const tileH = soilImg.height;
+            const viewW = canvas.width / CONFIG.ZOOM;
+            const viewH = canvas.height / CONFIG.ZOOM;
+            // Kamera-Y relativ zum Beginn des Erdreichs
+            const soilCamY = camY - topH;
+            const startCol = Math.floor(camX / tileW);
+            const endCol = Math.ceil((camX + viewW) / tileW);
+            const startRow = Math.max(0, Math.floor(soilCamY / tileH));
+            const endRow = Math.ceil((soilCamY + viewH) / tileH);
+
+            for (let row = startRow; row <= endRow; row++) {
+                for (let col = startCol; col <= endCol; col++) {
+                    const screenX = col * tileW - camX;
+                    const screenY = topH + row * tileH - camY;
+                    ctx.drawImage(soilImg, screenX, screenY, tileW, tileH);
+                }
+            }
+        }
+
+        ctx.restore();
+
+        // Hinweis zum Verlassen (ohne Zoom, direkt auf Canvas)
         ctx.save();
         ctx.fillStyle = 'rgba(0,0,0,0.5)';
         ctx.fillRect(0, canvas.height - 60 * window.devicePixelRatio, canvas.width, 60 * window.devicePixelRatio);
@@ -549,17 +612,17 @@
             return;
         }
 
-        // Logik
-        updateQueen();
-        updateCamera();
-
         // Rendern
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
         if (state.underground.active) {
-            // Untergrund-Ansicht
+            // Untergrund-Ansicht: eigene Kamera, keine Ameisen-Logik
+            updateUndergroundCamera();
             drawUnderground();
         } else {
+            // Oberflaechenlogik
+            updateQueen();
+            updateCamera();
             // Zoom anwenden fuer Spielwelt
             ctx.save();
             ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
