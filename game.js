@@ -67,7 +67,16 @@
             goingToHole: false, // Laeuft zu einem fertigen Loch um hineinzugehen
         },
         holes: [], // Array von {x, y} - gegrabene Loecher
-        underground: { active: false, camX: 0, camY: 0 }, // Untergrund-Ansicht
+        underground: {
+            active: false,
+            camX: 0, camY: 0,
+            queenX: 1500, queenY: 280,  // Ameisenposition im Untergrund
+            queenAngle: Math.PI / 2,
+            targetX: null, targetY: null,
+            moving: false,
+            exitX: 1500, exitY: 50,     // Hoehleneingang-Position
+            goingToExit: false,
+        }, // Untergrund-Ansicht
         doubleTap: {
             lastTime: 0, // Zeitpunkt des letzten Taps
             lastX: 0, // Welt-X des letzten Taps
@@ -165,9 +174,25 @@
 
     // --- Tap-Verarbeitung (Einzelklick vs. Doppelklick) ---
     function handleTap(worldX, worldY) {
-        // Untergrund-Ansicht: Tippen beendet sie
+        // Untergrund-Ansicht: Ameise steuern oder Ausgang benutzen
         if (state.underground.active) {
-            state.underground.active = false;
+            const u = state.underground;
+            const dxExit = worldX - u.exitX;
+            const dyExit = worldY - u.exitY;
+            const distExit = Math.sqrt(dxExit * dxExit + dyExit * dyExit);
+            if (distExit < 90) {
+                // Ameise zum Ausgang schicken
+                u.targetX = u.exitX;
+                u.targetY = u.exitY + 15;
+                u.moving = true;
+                u.goingToExit = true;
+            } else {
+                // Ameise zu Tippposition bewegen
+                u.targetX = Math.max(0, Math.min(worldX, CONFIG.UNDERGROUND_WIDTH));
+                u.targetY = Math.max(u.exitY + 10, Math.min(worldY, CONFIG.UNDERGROUND_HEIGHT));
+                u.moving = true;
+                u.goingToExit = false;
+            }
             return;
         }
 
@@ -298,8 +323,14 @@
 
         // Wenn es kein Drag war -> Tap verarbeiten (Einzel- oder Doppeltap)
         if (!state.touch.isDragging) {
-            const worldX = scaled.x / CONFIG.ZOOM + state.camera.x;
-            const worldY = scaled.y / CONFIG.ZOOM + state.camera.y;
+            let worldX, worldY;
+            if (state.underground.active) {
+                worldX = scaled.x / CONFIG.ZOOM + state.underground.camX;
+                worldY = scaled.y / CONFIG.ZOOM + state.underground.camY;
+            } else {
+                worldX = scaled.x / CONFIG.ZOOM + state.camera.x;
+                worldY = scaled.y / CONFIG.ZOOM + state.camera.y;
+            }
             handleTap(worldX, worldY);
         }
 
@@ -354,8 +385,14 @@
         if (!mouseDragging) {
             const mx = e.clientX * window.devicePixelRatio;
             const my = e.clientY * window.devicePixelRatio;
-            const worldX = mx / CONFIG.ZOOM + state.camera.x;
-            const worldY = my / CONFIG.ZOOM + state.camera.y;
+            let worldX, worldY;
+            if (state.underground.active) {
+                worldX = mx / CONFIG.ZOOM + state.underground.camX;
+                worldY = my / CONFIG.ZOOM + state.underground.camY;
+            } else {
+                worldX = mx / CONFIG.ZOOM + state.camera.x;
+                worldY = my / CONFIG.ZOOM + state.camera.y;
+            }
             handleTap(worldX, worldY);
         }
         mouseDown = false;
@@ -396,11 +433,25 @@
             // Wenn Ameise am Loch angekommen -> Untergrund-Ansicht aktivieren
             if (q.goingToHole) {
                 q.goingToHole = false;
-                // Kamera horizontal mittig starten, oben an der Oberflaechenkante
+                const u = state.underground;
+                // Ausgang-X proportional zur Loch-Position auf der Oberflaeche
+                const exitX = q.x * (CONFIG.UNDERGROUND_WIDTH / CONFIG.WORLD_WIDTH);
+                u.exitX = Math.max(CONFIG.QUEEN_SIZE, Math.min(exitX, CONFIG.UNDERGROUND_WIDTH - CONFIG.QUEEN_SIZE));
+                u.exitY = 55;
+                // Ameise startet knapp unterhalb des Hoehleneingangs
+                u.queenX = u.exitX;
+                u.queenY = CONFIG.UNDERGROUND_TOP_HEIGHT - 55;
+                u.queenAngle = Math.PI / 2; // schaut nach unten
+                u.targetX = null;
+                u.targetY = null;
+                u.moving = false;
+                u.goingToExit = false;
+                // Kamera so setzen, dass Eingang und Ameise sichtbar sind
                 const viewW = canvas.width / CONFIG.ZOOM;
-                state.underground.camX = Math.max(0, (CONFIG.UNDERGROUND_WIDTH - viewW) / 2);
-                state.underground.camY = 0;
-                state.underground.active = true;
+                const viewH = canvas.height / CONFIG.ZOOM;
+                u.camX = Math.max(0, Math.min(u.exitX - viewW / 2, CONFIG.UNDERGROUND_WIDTH - viewW));
+                u.camY = 0;
+                u.active = true;
             }
             return;
         }
@@ -416,6 +467,35 @@
         // Weltgrenzen
         q.x = Math.max(CONFIG.QUEEN_SIZE / 2, Math.min(q.x, CONFIG.WORLD_WIDTH - CONFIG.QUEEN_SIZE / 2));
         q.y = Math.max(CONFIG.QUEEN_SIZE / 2, Math.min(q.y, CONFIG.WORLD_HEIGHT - CONFIG.QUEEN_SIZE / 2));
+    }
+
+    // --- Ameisen-Logik im Untergrund ---
+    function updateUndergroundQueen() {
+        const u = state.underground;
+        if (!u.moving || u.targetX === null) return;
+
+        const dx = u.targetX - u.queenX;
+        const dy = u.targetY - u.queenY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < CONFIG.MOVE_DEAD_ZONE) {
+            u.moving = false;
+            u.targetX = null;
+            u.targetY = null;
+            if (u.goingToExit) {
+                u.goingToExit = false;
+                u.active = false; // Zurueck zur Oberflaechenansicht
+            }
+            return;
+        }
+
+        u.queenAngle = Math.atan2(dy, dx);
+        u.queenX += (dx / dist) * CONFIG.QUEEN_SPEED;
+        u.queenY += (dy / dist) * CONFIG.QUEEN_SPEED;
+
+        // Weltgrenzen
+        u.queenX = Math.max(CONFIG.QUEEN_SIZE / 2, Math.min(u.queenX, CONFIG.UNDERGROUND_WIDTH - CONFIG.QUEEN_SIZE / 2));
+        u.queenY = Math.max(u.exitY, Math.min(u.queenY, CONFIG.UNDERGROUND_HEIGHT - CONFIG.QUEEN_SIZE / 2));
     }
 
     // --- Rendering ---
@@ -518,17 +598,24 @@
         const u = state.underground;
         const viewW = canvas.width / CONFIG.ZOOM;
         const viewH = canvas.height / CONFIG.ZOOM;
+        // Kamera folgt der Ameise, wenn kein Drag aktiv
+        if (!state.touch.isDragging && !mouseDragging) {
+            u.camX = u.queenX - viewW / 2;
+            u.camY = u.queenY - viewH / 2;
+        }
         u.camX = Math.max(0, Math.min(u.camX, CONFIG.UNDERGROUND_WIDTH - viewW));
         u.camY = Math.max(0, Math.min(u.camY, CONFIG.UNDERGROUND_HEIGHT - viewH));
     }
 
     function drawUnderground() {
+        const u = state.underground;
         const topImg = state.images.underground;
         const soilImg = state.images.underground_deep;
-        const camX = state.underground.camX;
-        const camY = state.underground.camY;
+        const camX = u.camX;
+        const camY = u.camY;
         const worldW = CONFIG.UNDERGROUND_WIDTH;
         const topH = CONFIG.UNDERGROUND_TOP_HEIGHT;
+        const pulse = Math.sin(Date.now() / 420) * 0.2 + 0.8;
 
         ctx.save();
         ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
@@ -544,13 +631,11 @@
             const tileH = soilImg.height;
             const viewW = canvas.width / CONFIG.ZOOM;
             const viewH = canvas.height / CONFIG.ZOOM;
-            // Kamera-Y relativ zum Beginn des Erdreichs
             const soilCamY = camY - topH;
             const startCol = Math.floor(camX / tileW);
             const endCol = Math.ceil((camX + viewW) / tileW);
             const startRow = Math.max(0, Math.floor(soilCamY / tileH));
             const endRow = Math.ceil((soilCamY + viewH) / tileH);
-
             for (let row = startRow; row <= endRow; row++) {
                 for (let col = startCol; col <= endCol; col++) {
                     const screenX = col * tileW - camX;
@@ -560,16 +645,105 @@
             }
         }
 
-        ctx.restore();
+        // --- Hoehleneingang (Ausgang nach oben) ---
+        const exitScrX = u.exitX - camX;
+        const exitScrY = u.exitY - camY;
+        const tunnelW = 80;
+        const tunnelH = 48;
 
-        // Hinweis zum Verlassen (ohne Zoom, direkt auf Canvas)
+        // Lichtschein von der Oberflaeche (Tageslicht-Glow)
+        const glow = ctx.createRadialGradient(exitScrX, exitScrY, 0, exitScrX, exitScrY, 110);
+        glow.addColorStop(0, 'rgba(160, 255, 80, ' + (0.45 * pulse) + ')');
+        glow.addColorStop(0.5, 'rgba(100, 200, 40, ' + (0.2 * pulse) + ')');
+        glow.addColorStop(1, 'rgba(100, 200, 40, 0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.ellipse(exitScrX, exitScrY, 110, 90, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Dunkelheit des Tunnelinneren
+        ctx.fillStyle = '#0b0600';
+        ctx.beginPath();
+        ctx.ellipse(exitScrX, exitScrY, tunnelW / 2, tunnelH / 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Tunnel-Wand (Erdreich-Rand)
+        ctx.strokeStyle = '#7a5010';
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.ellipse(exitScrX, exitScrY, tunnelW / 2, tunnelH / 2, 0, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Helle Innenkontur (Lichtreflex)
+        ctx.strokeStyle = 'rgba(200, 160, 60, 0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.ellipse(exitScrX, exitScrY - 3, tunnelW / 2 - 4, tunnelH / 2 - 4, 0, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Pfeile nach oben neben dem Eingang
+        ctx.fillStyle = 'rgba(255, 210, 60, ' + pulse + ')';
+        ctx.beginPath();
+        // Linker Pfeil
+        ctx.moveTo(exitScrX - tunnelW / 2 - 16, exitScrY + 4);
+        ctx.lineTo(exitScrX - tunnelW / 2 - 8, exitScrY - 10);
+        ctx.lineTo(exitScrX - tunnelW / 2 - 0, exitScrY + 4);
+        ctx.closePath();
+        ctx.fill();
+        // Rechter Pfeil
+        ctx.beginPath();
+        ctx.moveTo(exitScrX + tunnelW / 2 + 0, exitScrY + 4);
+        ctx.lineTo(exitScrX + tunnelW / 2 + 8, exitScrY - 10);
+        ctx.lineTo(exitScrX + tunnelW / 2 + 16, exitScrY + 4);
+        ctx.closePath();
+        ctx.fill();
+
+        // "Ausgang"-Label in passender Schriftgroesse
+        const labelSize = Math.round(13 * window.devicePixelRatio / CONFIG.ZOOM);
+        ctx.font = 'bold ' + labelSize + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(255, 220, 60, ' + pulse + ')';
+        ctx.fillText('Ausgang', exitScrX, exitScrY + tunnelH / 2 + labelSize + 4);
+
+        // --- Zielmarkierung der Untergrund-Ameise ---
+        if (u.moving && u.targetX !== null && !u.goingToExit) {
+            const tScrX = u.targetX - camX;
+            const tScrY = u.targetY - camY;
+            const tPulse = Math.sin(Date.now() / 200) * 0.3 + 0.7;
+            ctx.save();
+            ctx.globalAlpha = tPulse * 0.5;
+            ctx.strokeStyle = '#ffcc00';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(tScrX, tScrY, 12 + tPulse * 6, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        // --- Ameise im Untergrund ---
+        const queenImg = state.images.queen;
+        if (queenImg) {
+            const scrX = u.queenX - camX;
+            const scrY = u.queenY - camY;
+            const bodyLength = CONFIG.QUEEN_SIZE * 1.5;
+            const bodyWidth = CONFIG.QUEEN_SIZE;
+            ctx.save();
+            ctx.translate(scrX, scrY);
+            ctx.rotate(u.queenAngle);
+            ctx.drawImage(queenImg, -bodyLength / 2, -bodyWidth / 2, bodyLength, bodyWidth);
+            ctx.restore();
+        }
+
+        ctx.restore(); // Ende des ZOOM-Blocks
+
+        // --- UI-Hinweis unten (in Canvas-Pixeln) ---
         ctx.save();
         ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fillRect(0, canvas.height - 60 * window.devicePixelRatio, canvas.width, 60 * window.devicePixelRatio);
+        ctx.fillRect(0, canvas.height - 56 * window.devicePixelRatio, canvas.width, 56 * window.devicePixelRatio);
         ctx.fillStyle = '#ffcc00';
-        ctx.font = (14 * window.devicePixelRatio) + 'px monospace';
+        ctx.font = (13 * window.devicePixelRatio) + 'px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('Tippen zum Verlassen', canvas.width / 2, canvas.height - 20 * window.devicePixelRatio);
+        ctx.fillText('Ausgang antippen \u2192 Ameise geht nach oben', canvas.width / 2, canvas.height - 18 * window.devicePixelRatio);
         ctx.restore();
     }
 
@@ -635,7 +809,8 @@
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
         if (state.underground.active) {
-            // Untergrund-Ansicht: eigene Kamera, keine Ameisen-Logik
+            // Untergrund-Ansicht: Ameise bewegen, Kamera folgt
+            updateUndergroundQueen();
             updateUndergroundCamera();
             drawUnderground();
         } else {
