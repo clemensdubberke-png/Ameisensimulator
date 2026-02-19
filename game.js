@@ -59,8 +59,10 @@
             digTimer: 0, // Verbleibende Frames fuer Graben
             digX: null, // Zielposition zum Graben
             digY: null,
+            goingToHole: false, // Laeuft zu einem fertigen Loch um hineinzugehen
         },
         holes: [], // Array von {x, y} - gegrabene Loecher
+        underground: { active: false }, // Untergrund-Ansicht aktiv
         doubleTap: {
             lastTime: 0, // Zeitpunkt des letzten Taps
             lastX: 0, // Welt-X des letzten Taps
@@ -93,14 +95,16 @@
 
     async function loadAssets() {
         try {
-            const [grass, queen, hole] = await Promise.all([
+            const [grass, queen, hole, underground] = await Promise.all([
                 loadImage('assets/images/grass.png'),
                 loadImage('assets/images/queen.png'),
                 loadImage('assets/images/hole.png'),
+                loadImage('assets/images/underground.png'),
             ]);
             state.images.grass = grass;
             state.images.queen = queen;
             state.images.hole = hole;
+            state.images.underground = underground;
             state.loaded = true;
             document.getElementById('loading').style.display = 'none';
         } catch (e) {
@@ -135,6 +139,32 @@
 
     // --- Tap-Verarbeitung (Einzelklick vs. Doppelklick) ---
     function handleTap(worldX, worldY) {
+        // Untergrund-Ansicht: Tippen beendet sie
+        if (state.underground.active) {
+            state.underground.active = false;
+            return;
+        }
+
+        // Pruefen ob auf ein fertiges Loch geklickt wurde
+        const holeRadius = CONFIG.HOLE_SIZE / 2;
+        for (let i = 0; i < state.holes.length; i++) {
+            const h = state.holes[i];
+            const dx = worldX - h.x;
+            const dy = worldY - h.y;
+            if (Math.sqrt(dx * dx + dy * dy) <= holeRadius) {
+                // Klick auf Loch -> Ameise zum Loch schicken
+                state.queen.targetX = h.x;
+                state.queen.targetY = h.y;
+                state.queen.moving = true;
+                state.queen.digging = false;
+                state.queen.digX = null;
+                state.queen.digY = null;
+                state.queen.goingToHole = true;
+                state.doubleTap.lastTime = 0; // Kein Doppel-Tap-Graben auf Loecher
+                return;
+            }
+        }
+
         const now = Date.now();
         const dt = now - state.doubleTap.lastTime;
         const dx = worldX - state.doubleTap.lastX;
@@ -157,6 +187,7 @@
             state.queen.digging = false;
             state.queen.digX = null;
             state.queen.digY = null;
+            state.queen.goingToHole = false;
         }
     }
 
@@ -326,6 +357,11 @@
             if (q.digging) {
                 q.digTimer = CONFIG.DIG_DURATION;
             }
+            // Wenn Ameise am Loch angekommen -> Untergrund-Ansicht aktivieren
+            if (q.goingToHole) {
+                q.goingToHole = false;
+                state.underground.active = true;
+            }
             return;
         }
 
@@ -438,6 +474,23 @@
         ctx.restore();
     }
 
+    function drawUnderground() {
+        const img = state.images.underground;
+        if (!img) return;
+
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        // Hinweis zum Verlassen
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(0, canvas.height - 60 * window.devicePixelRatio, canvas.width, 60 * window.devicePixelRatio);
+        ctx.fillStyle = '#ffcc00';
+        ctx.font = (14 * window.devicePixelRatio) + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('Tippen zum Verlassen', canvas.width / 2, canvas.height - 20 * window.devicePixelRatio);
+        ctx.restore();
+    }
+
     function drawMinimap() {
         const mapW = 120;
         const mapH = 120;
@@ -503,18 +556,23 @@
         // Rendern
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Zoom anwenden fuer Spielwelt
-        ctx.save();
-        ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
-        drawGrass();
-        drawHoles();
-        drawTargetMarker();
-        drawQueen();
-        drawDigIndicator();
-        ctx.restore();
+        if (state.underground.active) {
+            // Untergrund-Ansicht
+            drawUnderground();
+        } else {
+            // Zoom anwenden fuer Spielwelt
+            ctx.save();
+            ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
+            drawGrass();
+            drawHoles();
+            drawTargetMarker();
+            drawQueen();
+            drawDigIndicator();
+            ctx.restore();
 
-        // Minimap ohne Zoom zeichnen
-        drawMinimap();
+            // Minimap ohne Zoom zeichnen
+            drawMinimap();
+        }
 
         requestAnimationFrame(gameLoop);
     }
