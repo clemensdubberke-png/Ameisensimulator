@@ -35,6 +35,7 @@
         UNDERGROUND_WIDTH: 3000,   // Breite der Untergrund-Welt in Pixeln
         UNDERGROUND_HEIGHT: 3000,  // Tiefe der Untergrund-Welt in Pixeln
         UNDERGROUND_TOP_HEIGHT: 350, // Hoehe des oberen Streifens (underground.png)
+        TUNNEL_RADIUS: 50,         // Halbe Breite eines Gangs in Welt-Pixeln
     };
 
     // --- Canvas Setup ---
@@ -76,6 +77,10 @@
             moving: false,
             exitX: 1500, exitY: 100,    // Hoehleneingang-Position (tief in der Erde)
             goingToExit: false,
+            tunnels: [],               // Gegrabene Gaenge: [{x1,y1,x2,y2}]
+            lastTapTime: 0,            // Doppelklick-Erkennung im Untergrund
+            lastTapX: 0,
+            lastTapY: 0,
         }, // Untergrund-Ansicht
         doubleTap: {
             lastTime: 0, // Zeitpunkt des letzten Taps
@@ -172,26 +177,77 @@
         state.camera.y = Math.max(0, Math.min(state.camera.y, CONFIG.WORLD_HEIGHT - viewH));
     }
 
+    // --- Hilfsfunktion: Naechster Punkt auf dem Tunnel-Netzwerk ---
+    function closestPointOnTunnels(px, py, tunnels) {
+        let bestX = px, bestY = py, bestDist = Infinity;
+        for (let i = 0; i < tunnels.length; i++) {
+            const seg = tunnels[i];
+            const dx = seg.x2 - seg.x1;
+            const dy = seg.y2 - seg.y1;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq === 0) continue;
+            let t = ((px - seg.x1) * dx + (py - seg.y1) * dy) / lenSq;
+            t = Math.max(0, Math.min(1, t));
+            const cx = seg.x1 + t * dx;
+            const cy = seg.y1 + t * dy;
+            const dist = Math.sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestX = cx;
+                bestY = cy;
+            }
+        }
+        return {x: bestX, y: bestY, dist: bestDist};
+    }
+
     // --- Tap-Verarbeitung (Einzelklick vs. Doppelklick) ---
     function handleTap(worldX, worldY) {
-        // Untergrund-Ansicht: Ameise steuern oder Ausgang benutzen
+        // Untergrund-Ansicht: Ameise steuern, Gaenge graben, Ausgang benutzen
         if (state.underground.active) {
             const u = state.underground;
+
+            // Ausgang antippen -> nach oben gehen
             const dxExit = worldX - u.exitX;
             const dyExit = worldY - u.exitY;
-            const distExit = Math.sqrt(dxExit * dxExit + dyExit * dyExit);
-            if (distExit < 90) {
-                // Ameise zum Ausgang schicken
+            if (Math.sqrt(dxExit * dxExit + dyExit * dyExit) < 90) {
                 u.targetX = u.exitX;
                 u.targetY = u.exitY + 15;
                 u.moving = true;
                 u.goingToExit = true;
-            } else {
-                // Ameise zu Tippposition bewegen
-                u.targetX = Math.max(0, Math.min(worldX, CONFIG.UNDERGROUND_WIDTH));
-                u.targetY = Math.max(u.exitY + 10, Math.min(worldY, CONFIG.UNDERGROUND_HEIGHT));
+                u.lastTapTime = 0;
+                return;
+            }
+
+            // Doppelklick-Erkennung
+            const now = Date.now();
+            const dt = now - u.lastTapTime;
+            const tapDx = worldX - u.lastTapX;
+            const tapDy = worldY - u.lastTapY;
+            const tapDist = Math.sqrt(tapDx * tapDx + tapDy * tapDy);
+
+            if (dt < CONFIG.DOUBLE_TAP_DELAY && tapDist < CONFIG.DOUBLE_TAP_RADIUS) {
+                // Doppelklick: Neuen Gang von aktueller Ameisenposition graben
+                u.lastTapTime = 0; // Reset, kein Triple-Tap
+                const tx = Math.max(0, Math.min(worldX, CONFIG.UNDERGROUND_WIDTH));
+                const ty = Math.max(u.exitY, Math.min(worldY, CONFIG.UNDERGROUND_HEIGHT));
+                u.tunnels.push({x1: u.queenX, y1: u.queenY, x2: tx, y2: ty});
+                u.targetX = tx;
+                u.targetY = ty;
                 u.moving = true;
                 u.goingToExit = false;
+            } else {
+                // Einfacher Tap: nur auf vorhandenen Gaengen bewegen
+                u.lastTapTime = now;
+                u.lastTapX = worldX;
+                u.lastTapY = worldY;
+                const cp = closestPointOnTunnels(worldX, worldY, u.tunnels);
+                if (cp.dist <= CONFIG.TUNNEL_RADIUS * 2.5) {
+                    u.targetX = cp.x;
+                    u.targetY = cp.y;
+                    u.moving = true;
+                    u.goingToExit = false;
+                }
+                // Tap ausserhalb aller Gaenge: ignorieren
             }
             return;
         }
@@ -446,6 +502,11 @@
                 u.targetY = null;
                 u.moving = false;
                 u.goingToExit = false;
+                // Eingangs-Gang: senkrecht von Ausgangsoval bis zur Startposition der Ameise
+                u.tunnels = [{x1: u.exitX, y1: u.exitY, x2: u.exitX, y2: u.queenY}];
+                u.lastTapTime = 0;
+                u.lastTapX = 0;
+                u.lastTapY = 0;
                 // Kamera so setzen, dass Eingang und Ameise sichtbar sind
                 const viewW = canvas.width / CONFIG.ZOOM;
                 const viewH = canvas.height / CONFIG.ZOOM;
@@ -645,6 +706,45 @@
             }
         }
 
+        // --- Gaenge zeichnen (ueber Erde, unter Ameise) ---
+        if (u.tunnels.length > 0) {
+            const r = CONFIG.TUNNEL_RADIUS;
+            ctx.save();
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            // Aeusserer Erdrand (dunklerer Rand)
+            ctx.strokeStyle = '#0e0700';
+            ctx.lineWidth = r * 2 + 8;
+            for (let i = 0; i < u.tunnels.length; i++) {
+                const seg = u.tunnels[i];
+                ctx.beginPath();
+                ctx.moveTo(seg.x1 - camX, seg.y1 - camY);
+                ctx.lineTo(seg.x2 - camX, seg.y2 - camY);
+                ctx.stroke();
+            }
+            // Tunnel-Hohlraum (dunkles Erdreich-Inneres)
+            ctx.strokeStyle = '#241005';
+            ctx.lineWidth = r * 2;
+            for (let i = 0; i < u.tunnels.length; i++) {
+                const seg = u.tunnels[i];
+                ctx.beginPath();
+                ctx.moveTo(seg.x1 - camX, seg.y1 - camY);
+                ctx.lineTo(seg.x2 - camX, seg.y2 - camY);
+                ctx.stroke();
+            }
+            // Innere Mittellinie (subtiler Lichtschein – Gang wirkt tiefer)
+            ctx.strokeStyle = 'rgba(80, 40, 10, 0.4)';
+            ctx.lineWidth = r * 0.6;
+            for (let i = 0; i < u.tunnels.length; i++) {
+                const seg = u.tunnels[i];
+                ctx.beginPath();
+                ctx.moveTo(seg.x1 - camX, seg.y1 - camY);
+                ctx.lineTo(seg.x2 - camX, seg.y2 - camY);
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
+
         // --- Hoehleneingang (Ausgang nach oben) ---
         const exitScrX = u.exitX - camX;
         const exitScrY = u.exitY - camY;
@@ -743,7 +843,7 @@
         ctx.fillStyle = '#ffcc00';
         ctx.font = (13 * window.devicePixelRatio) + 'px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('Ausgang antippen \u2192 Ameise geht nach oben', canvas.width / 2, canvas.height - 18 * window.devicePixelRatio);
+        ctx.fillText('Doppeltippen: Gang graben  |  Ausgang: nach oben', canvas.width / 2, canvas.height - 18 * window.devicePixelRatio);
         ctx.restore();
     }
 
