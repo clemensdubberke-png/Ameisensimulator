@@ -121,11 +121,27 @@
             document.getElementById('loading').innerHTML =
                 '<div style="text-align:center;padding:20px;">' +
                 '<p style="color:#ff6b6b;margin-bottom:12px;">Fehler beim Laden der Grafiken!</p>' +
-                '<p style="font-size:14px;">Bitte stelle sicher, dass folgende Dateien vorhanden sind:</p>' +
-                '<p style="font-size:14px;margin-top:8px;color:#ffcc00;">assets/images/grass.png</p>' +
-                '<p style="font-size:14px;color:#ffcc00;">assets/images/queen.png</p>' +
-                '<p style="font-size:14px;color:#ffcc00;">assets/images/hole.png</p>' +
+                '<p style="font-size:13px;color:#aaa;margin-bottom:16px;">' + e.message + '</p>' +
+                '<button id="clearCacheBtn" style="background:#4a7a2a;color:#fff;border:none;' +
+                'padding:12px 24px;font-size:15px;border-radius:6px;cursor:pointer;">' +
+                'Cache leeren &amp; neu laden</button>' +
                 '</div>';
+            document.getElementById('clearCacheBtn').addEventListener('click', function () {
+                if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.getRegistrations().then(function (regs) {
+                        var deletes = regs.map(function (r) { return r.unregister(); });
+                        return Promise.all(deletes);
+                    }).then(function () {
+                        return caches.keys();
+                    }).then(function (keys) {
+                        return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                    }).then(function () {
+                        location.reload(true);
+                    });
+                } else {
+                    location.reload(true);
+                }
+            });
             console.error(e);
         }
     }

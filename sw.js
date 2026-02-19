@@ -1,5 +1,5 @@
 // Service Worker fuer Offline-Funktionalitaet
-const CACHE_NAME = 'ameisensimulator-v5';
+const CACHE_NAME = 'ameisensimulator-v6';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
@@ -12,18 +12,24 @@ const ASSETS_TO_CACHE = [
     './assets/images/underground_deep.png',
 ];
 
-// Installation: Alle Assets cachen
+// Installation: Assets einzeln cachen - eine fehlende Datei bricht nicht alles ab
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME).then((cache) => {
-            return cache.addAll(ASSETS_TO_CACHE);
+            return Promise.all(
+                ASSETS_TO_CACHE.map((url) =>
+                    cache.add(url).catch(() => {
+                        // Einzelne Datei konnte nicht gecacht werden - kein Problem
+                        console.warn('[SW] Konnte nicht cachen:', url);
+                    })
+                )
+            );
         })
     );
-    // Sofort aktivieren, ohne auf alte Tabs zu warten
     self.skipWaiting();
 });
 
-// Aktivierung: Alte Caches entfernen
+// Aktivierung: Alle alten Caches entfernen
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys().then((cacheNames) => {
@@ -53,7 +59,11 @@ self.addEventListener('fetch', (event) => {
             })
             .catch(() => {
                 // Netzwerk nicht verfuegbar -> aus Cache laden (Offline-Modus)
-                return caches.match(event.request);
+                return caches.match(event.request).then((cached) => {
+                    if (cached) return cached;
+                    // Kein Cache-Eintrag -> Browser-Standard-Fehler
+                    return Response.error();
+                });
             })
     );
 });
