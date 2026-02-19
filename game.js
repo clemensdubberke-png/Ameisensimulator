@@ -78,6 +78,7 @@
             exitX: 1500, exitY: 100,    // Hoehleneingang-Position (tief in der Erde)
             goingToExit: false,
             tunnels: [],               // Gegrabene Gaenge: [{x1,y1,x2,y2}]
+            currentDig: null,          // Aktuell gegrabener Gang: {x1,y1} (Endpunkt = Ameisenpos.)
             lastTapTime: 0,            // Doppelklick-Erkennung im Untergrund
             lastTapX: 0,
             lastTapY: 0,
@@ -206,10 +207,14 @@
         if (state.underground.active) {
             const u = state.underground;
 
-            // Ausgang antippen -> nach oben gehen
+            // Ausgang antippen -> laufendes Graben abschliessen + nach oben gehen
             const dxExit = worldX - u.exitX;
             const dyExit = worldY - u.exitY;
             if (Math.sqrt(dxExit * dxExit + dyExit * dyExit) < 90) {
+                if (u.currentDig) {
+                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                    u.currentDig = null;
+                }
                 u.targetX = u.exitX;
                 u.targetY = u.exitY + 15;
                 u.moving = true;
@@ -226,20 +231,28 @@
             const tapDist = Math.sqrt(tapDx * tapDx + tapDy * tapDy);
 
             if (dt < CONFIG.DOUBLE_TAP_DELAY && tapDist < CONFIG.DOUBLE_TAP_RADIUS) {
-                // Doppelklick: Neuen Gang von aktueller Ameisenposition graben
+                // Doppelklick: laufendes Graben abschliessen, neues starten
+                if (u.currentDig) {
+                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                }
                 u.lastTapTime = 0; // Reset, kein Triple-Tap
                 const tx = Math.max(0, Math.min(worldX, CONFIG.UNDERGROUND_WIDTH));
                 const ty = Math.max(u.exitY, Math.min(worldY, CONFIG.UNDERGROUND_HEIGHT));
-                u.tunnels.push({x1: u.queenX, y1: u.queenY, x2: tx, y2: ty});
+                // Neues Graben startet an aktueller Ameisenposition
+                u.currentDig = {x1: u.queenX, y1: u.queenY};
                 u.targetX = tx;
                 u.targetY = ty;
                 u.moving = true;
                 u.goingToExit = false;
             } else {
-                // Einfacher Tap: nur auf vorhandenen Gaengen bewegen
+                // Einfacher Tap: laufendes Graben abschliessen + auf vorhandenem Gang bewegen
                 u.lastTapTime = now;
                 u.lastTapX = worldX;
                 u.lastTapY = worldY;
+                if (u.currentDig) {
+                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                    u.currentDig = null;
+                }
                 const cp = closestPointOnTunnels(worldX, worldY, u.tunnels);
                 if (cp.dist <= CONFIG.TUNNEL_RADIUS * 2.5) {
                     u.targetX = cp.x;
@@ -504,6 +517,7 @@
                 u.goingToExit = false;
                 // Eingangs-Gang: senkrecht von Ausgangsoval bis zur Startposition der Ameise
                 u.tunnels = [{x1: u.exitX, y1: u.exitY, x2: u.exitX, y2: u.queenY}];
+                u.currentDig = null;
                 u.lastTapTime = 0;
                 u.lastTapX = 0;
                 u.lastTapY = 0;
@@ -540,6 +554,11 @@
         const dist = Math.sqrt(dx * dx + dy * dy);
 
         if (dist < CONFIG.MOVE_DEAD_ZONE) {
+            // Gegrabenen Gang abschliessen (Endpunkt = Zielposition)
+            if (u.currentDig) {
+                u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                u.currentDig = null;
+            }
             u.moving = false;
             u.targetX = null;
             u.targetY = null;
@@ -707,7 +726,12 @@
         }
 
         // --- Gaenge zeichnen (ueber Erde, unter Ameise) ---
-        if (u.tunnels.length > 0) {
+        // Alle Segmente: abgeschlossene Gaenge + aktuell gegrabener (waechst mit Ameise)
+        const allSegs = u.tunnels.slice();
+        if (u.currentDig) {
+            allSegs.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+        }
+        if (allSegs.length > 0) {
             const r = CONFIG.TUNNEL_RADIUS;
             ctx.save();
             ctx.lineCap = 'round';
@@ -715,8 +739,8 @@
             // Aeusserer Erdrand (dunklerer Rand)
             ctx.strokeStyle = '#0e0700';
             ctx.lineWidth = r * 2 + 8;
-            for (let i = 0; i < u.tunnels.length; i++) {
-                const seg = u.tunnels[i];
+            for (let i = 0; i < allSegs.length; i++) {
+                const seg = allSegs[i];
                 ctx.beginPath();
                 ctx.moveTo(seg.x1 - camX, seg.y1 - camY);
                 ctx.lineTo(seg.x2 - camX, seg.y2 - camY);
@@ -725,8 +749,8 @@
             // Tunnel-Hohlraum (dunkles Erdreich-Inneres)
             ctx.strokeStyle = '#241005';
             ctx.lineWidth = r * 2;
-            for (let i = 0; i < u.tunnels.length; i++) {
-                const seg = u.tunnels[i];
+            for (let i = 0; i < allSegs.length; i++) {
+                const seg = allSegs[i];
                 ctx.beginPath();
                 ctx.moveTo(seg.x1 - camX, seg.y1 - camY);
                 ctx.lineTo(seg.x2 - camX, seg.y2 - camY);
@@ -735,8 +759,8 @@
             // Innere Mittellinie (subtiler Lichtschein – Gang wirkt tiefer)
             ctx.strokeStyle = 'rgba(80, 40, 10, 0.4)';
             ctx.lineWidth = r * 0.6;
-            for (let i = 0; i < u.tunnels.length; i++) {
-                const seg = u.tunnels[i];
+            for (let i = 0; i < allSegs.length; i++) {
+                const seg = allSegs[i];
                 ctx.beginPath();
                 ctx.moveTo(seg.x1 - camX, seg.y1 - camY);
                 ctx.lineTo(seg.x2 - camX, seg.y2 - camY);
