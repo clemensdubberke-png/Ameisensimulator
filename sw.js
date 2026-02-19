@@ -1,5 +1,5 @@
 // Service Worker fuer Offline-Funktionalitaet
-const CACHE_NAME = 'ameisensimulator-v6';
+const CACHE_NAME = 'ameisensimulator-v7';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
