@@ -632,7 +632,14 @@
                 u.moving = false;
                 u.goingToExit = false;
                 // Eingangs-Gang: senkrecht von Ausgangsoval bis zur Startposition der Ameise
-                u.tunnels = [{x1: u.exitX, y1: u.exitY, x2: u.exitX, y2: u.queenY}];
+                // Beim ersten Betreten: Tunnel-Array initialisieren
+                // Bei erneutem Betreten: bestehende Gaenge beibehalten, nur Eingangs-Gang aktualisieren
+                if (u.tunnels.length === 0) {
+                    u.tunnels = [{x1: u.exitX, y1: u.exitY, x2: u.exitX, y2: u.queenY}];
+                } else {
+                    // Eingangs-Gang (erster Tunnel) auf neue Position aktualisieren
+                    u.tunnels[0] = {x1: u.exitX, y1: u.exitY, x2: u.exitX, y2: u.queenY};
+                }
                 u.currentDig = null;
                 u.lastTapTime = 0;
                 u.lastTapX = 0;
