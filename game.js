@@ -203,7 +203,8 @@
 
     // --- Wegfindung durch den Tunnel-Graphen (Dijkstra) ---
     function findTunnelPath(fromX, fromY, toX, toY, tunnels) {
-        const SNAP_SQ = 100; // Knotenabgleich-Toleranz: (10 Welt-Pixel)^2
+        const SNAP_SQ = 625; // Knotenabgleich-Toleranz: (25 Welt-Pixel)^2
+        const ON_SEG_SQ = CONFIG.TUNNEL_RADIUS * CONFIG.TUNNEL_RADIUS; // 2500 = (50px)^2
 
         // --- Phase 1: Knoten sammeln ---
         const nodes = []; // [{x, y}]
@@ -252,7 +253,7 @@
                 t = Math.max(0, Math.min(1, t));
                 const cx = seg.x1 + t * sdx, cy = seg.y1 + t * sdy;
                 const distSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
-                if (distSq <= SNAP_SQ * 9) {
+                if (distSq <= ON_SEG_SQ) {
                     onSeg.push({ni, t});
                 }
             }
@@ -318,7 +319,10 @@
                     u.currentDig = null;
                 }
                 const exitTarget = {x: u.exitX, y: u.exitY + 15};
-                const exitPath = findTunnelPath(u.queenX, u.queenY, exitTarget.x, exitTarget.y, u.tunnels);
+                const sp = closestPointOnTunnels(u.queenX, u.queenY, u.tunnels);
+                const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : u.queenX;
+                const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : u.queenY;
+                const exitPath = findTunnelPath(startX, startY, exitTarget.x, exitTarget.y, u.tunnels);
                 u.path = exitPath || [exitTarget];
                 u.moving = true;
                 u.goingToExit = true;
@@ -356,11 +360,18 @@
                 }
                 const cp = closestPointOnTunnels(worldX, worldY, u.tunnels);
                 if (cp.dist <= CONFIG.TUNNEL_RADIUS * 2.5) {
-                    const newPath = findTunnelPath(u.queenX, u.queenY, cp.x, cp.y, u.tunnels);
+                    // Startposition auf naechsten Tunnel snappen
+                    const sp = closestPointOnTunnels(u.queenX, u.queenY, u.tunnels);
+                    const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : u.queenX;
+                    const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : u.queenY;
+                    const newPath = findTunnelPath(startX, startY, cp.x, cp.y, u.tunnels);
                     if (newPath) {
                         u.path = newPath;
                         u.moving = true;
                         u.goingToExit = false;
+                    } else {
+                        u.path = [];
+                        u.moving = false;
                     }
                 }
                 // Tap ausserhalb aller Gaenge: ignorieren
