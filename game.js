@@ -216,9 +216,9 @@
             return nodes.length - 1;
         }
 
-        const segEnds = []; // [i1, i2] fuer jedes Tunnel-Segment
         for (const seg of tunnels) {
-            segEnds.push([getOrAddNode(seg.x1, seg.y1), getOrAddNode(seg.x2, seg.y2)]);
+            getOrAddNode(seg.x1, seg.y1);
+            getOrAddNode(seg.x2, seg.y2);
         }
         const startId = getOrAddNode(fromX, fromY);
         const endId   = getOrAddNode(toX,   toY);
@@ -238,43 +238,29 @@
             adj[b].push({to: a, d});
         }
 
-        // Kanten zwischen Segment-Endpunkten
-        for (const [i1, i2] of segEnds) addEdge(i1, i2);
-
-        // Knoten mit den Segmenten verbinden, auf denen er liegt
-        function connectToSegments(nodeId, px, py) {
-            for (let si = 0; si < tunnels.length; si++) {
-                const seg = tunnels[si];
-                const sdx = seg.x2 - seg.x1, sdy = seg.y2 - seg.y1;
-                const lenSq = sdx * sdx + sdy * sdy;
-                if (lenSq < 1) continue;
-                let t = ((px - seg.x1) * sdx + (py - seg.y1) * sdy) / lenSq;
-                t = Math.max(0, Math.min(1, t));
-                const cx = seg.x1 + t * sdx, cy = seg.y1 + t * sdy;
-                if ((px - cx) * (px - cx) + (py - cy) * (py - cy) > SNAP_SQ * 9) continue;
-                const [i1, i2] = segEnds[si];
-                addEdge(nodeId, i1);
-                addEdge(nodeId, i2);
-            }
-        }
-        connectToSegments(startId, fromX, fromY);
-        connectToSegments(endId,   toX,   toY);
-
-        // Direkte Kante wenn Start und Ziel auf demselben Segment liegen
+        // Fuer jedes Segment alle darauf liegenden Knoten finden und verketten
         for (let si = 0; si < tunnels.length; si++) {
             const seg = tunnels[si];
             const sdx = seg.x2 - seg.x1, sdy = seg.y2 - seg.y1;
             const lenSq = sdx * sdx + sdy * sdy;
             if (lenSq < 1) continue;
-            const check = (px, py) => {
+
+            const onSeg = [];
+            for (let ni = 0; ni < nodes.length; ni++) {
+                const px = nodes[ni].x, py = nodes[ni].y;
                 let t = ((px - seg.x1) * sdx + (py - seg.y1) * sdy) / lenSq;
                 t = Math.max(0, Math.min(1, t));
                 const cx = seg.x1 + t * sdx, cy = seg.y1 + t * sdy;
-                return (px - cx) * (px - cx) + (py - cy) * (py - cy) <= SNAP_SQ * 9;
-            };
-            if (check(fromX, fromY) && check(toX, toY)) {
-                addEdge(startId, endId);
-                break;
+                const distSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
+                if (distSq <= SNAP_SQ * 9) {
+                    onSeg.push({ni, t});
+                }
+            }
+
+            onSeg.sort((a, b) => a.t - b.t);
+
+            for (let i = 0; i < onSeg.length - 1; i++) {
+                addEdge(onSeg[i].ni, onSeg[i + 1].ni);
             }
         }
 
