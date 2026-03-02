@@ -1,15 +1,16 @@
 // Service Worker fuer Offline-Funktionalitaet
-const CACHE_NAME = 'ameisensimulator-v13';
+const CACHE_NAME = 'ameisensimulator-v14';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
-    './game.js?v=12',
+    './game.js?v=13',
     './manifest.json',
     './assets/images/grass.png',
     './assets/images/queen.png',
     './assets/images/hole.png',
     './assets/images/underground.png',
     './assets/images/underground_deep.png',
+    './assets/images/leaf.png',
 ];
 
 // Installation: Assets einzeln cachen - eine fehlende Datei bricht nicht alles ab

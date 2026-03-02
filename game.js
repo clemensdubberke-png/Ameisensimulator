@@ -36,6 +36,11 @@
         UNDERGROUND_HEIGHT: 3000,  // Tiefe der Untergrund-Welt in Pixeln
         UNDERGROUND_TOP_HEIGHT: 350, // Hoehe des oberen Streifens (underground.png)
         TUNNEL_RADIUS: 50,         // Halbe Breite eines Gangs in Welt-Pixeln
+
+        // Futter (Blaetter)
+        LEAF_SIZE: 36,             // Anzeige-Groesse eines Blattes in Pixeln
+        LEAF_SCATTER: 40,          // Max Streuung der Blaetter im Haufen
+        LEAF_CARRY_OFFSET: 50,     // Abstand des getragenen Blatts vor dem Kopf
     };
 
     // --- Canvas Setup ---
@@ -66,8 +71,11 @@
             digX: null, // Zielposition zum Graben
             digY: null,
             goingToHole: false, // Laeuft zu einem fertigen Loch um hineinzugehen
+            carrying: false,   // Traegt gerade ein Blatt
+            goingToLeaf: false, // Laeuft zu einem Blatt um es aufzuheben
         },
         holes: [], // Array von {x, y} - gegrabene Loecher
+        food: null, // Aktueller Blatterhaufen: {x, y, leaves: [{ox, oy, angle}], count: n}
         underground: {
             active: false,
             camX: 0, camY: 0,
@@ -115,16 +123,18 @@
 
     async function loadAssets() {
         try {
-            const [grass, queen, hole, underground] = await Promise.all([
+            const [grass, queen, hole, underground, leaf] = await Promise.all([
                 loadImage('assets/images/grass.png'),
                 loadImage('assets/images/queen.png'),
                 loadImage('assets/images/hole.png'),
                 loadImage('assets/images/underground.png'),
+                loadImage('assets/images/leaf.png'),
             ]);
             state.images.grass = grass;
             state.images.queen = queen;
             state.images.hole = hole;
             state.images.underground = underground;
+            state.images.leaf = leaf;
             state.loaded = true;
             document.getElementById('loading').style.display = 'none';
 
@@ -199,6 +209,28 @@
             }
         }
         return {x: bestX, y: bestY, dist: bestDist};
+    }
+
+    // --- Futter-Haufen erzeugen ---
+    function spawnFoodPile() {
+        // Zufaellige Groesse: 10, 20 oder 30 Blaetter
+        const sizes = [10, 20, 30];
+        const count = sizes[Math.floor(Math.random() * sizes.length)];
+        // Zufaellige Position (mit Rand-Abstand)
+        const margin = 200;
+        const x = margin + Math.random() * (CONFIG.WORLD_WIDTH - margin * 2);
+        const y = margin + Math.random() * (CONFIG.WORLD_HEIGHT - margin * 2);
+        // Blaetter zufaellig im Haufen verteilen
+        const leaves = [];
+        for (let i = 0; i < count; i++) {
+            const scatter = CONFIG.LEAF_SCATTER * Math.sqrt(count / 10); // Groesserer Haufen = mehr Streuung
+            leaves.push({
+                ox: (Math.random() - 0.5) * scatter,
+                oy: (Math.random() - 0.5) * scatter,
+                angle: Math.random() * Math.PI * 2,
+            });
+        }
+        state.food = { x, y, leaves, count };
     }
 
     // --- Wegfindung durch den Tunnel-Graphen (Dijkstra) ---
@@ -406,8 +438,25 @@
         const dist = Math.sqrt(dx * dx + dy * dy);
 
         if (dt < CONFIG.DOUBLE_TAP_DELAY && dist < CONFIG.DOUBLE_TAP_RADIUS) {
-            // Doppelklick erkannt -> Graben starten
             state.doubleTap.lastTime = 0; // Reset damit kein Triple-Tap ausloest
+            // Doppelklick auf Blaetterhaufen -> Blatt aufheben
+            if (state.food && state.food.leaves.length > 0 && !state.queen.carrying) {
+                const fdx = worldX - state.food.x;
+                const fdy = worldY - state.food.y;
+                const foodRadius = CONFIG.LEAF_SCATTER * Math.sqrt(state.food.count / 10) + CONFIG.LEAF_SIZE;
+                if (Math.sqrt(fdx * fdx + fdy * fdy) < foodRadius) {
+                    state.queen.targetX = state.food.x;
+                    state.queen.targetY = state.food.y;
+                    state.queen.moving = true;
+                    state.queen.digging = false;
+                    state.queen.digX = null;
+                    state.queen.digY = null;
+                    state.queen.goingToHole = false;
+                    state.queen.goingToLeaf = true;
+                    return;
+                }
+            }
+            // Sonst: Graben starten
             startDigging(worldX, worldY);
         } else {
             // Einfacher Tap -> Ameise bewegen
@@ -648,6 +697,18 @@
                 u.camY = 0;
                 u.active = true;
             }
+            // Wenn Ameise beim Blaetterhaufen angekommen -> Blatt aufheben
+            if (q.goingToLeaf) {
+                q.goingToLeaf = false;
+                if (state.food && state.food.leaves.length > 0) {
+                    state.food.leaves.pop();
+                    q.carrying = true;
+                    // Haufen leer -> neuen spawnen
+                    if (state.food.leaves.length === 0) {
+                        spawnFoodPile();
+                    }
+                }
+            }
             return;
         }
 
@@ -740,6 +801,24 @@
         }
     }
 
+    function drawFood() {
+        const img = state.images.leaf;
+        if (!img || !state.food) return;
+
+        const f = state.food;
+        const size = CONFIG.LEAF_SIZE;
+        for (let i = 0; i < f.leaves.length; i++) {
+            const leaf = f.leaves[i];
+            const lx = f.x + leaf.ox - state.camera.x;
+            const ly = f.y + leaf.oy - state.camera.y;
+            ctx.save();
+            ctx.translate(lx, ly);
+            ctx.rotate(leaf.angle);
+            ctx.drawImage(img, -size / 2, -size / 2, size, size);
+            ctx.restore();
+        }
+    }
+
     function drawDigIndicator() {
         const q = state.queen;
         if (!q.digging || q.digTimer <= 0 || q.moving) return;
@@ -778,6 +857,11 @@
         // Rotation: Bild zeigt nach rechts (0), daher kein Offset noetig
         ctx.rotate(q.angle);
         ctx.drawImage(img, -bodyLength / 2, -bodyWidth / 2, bodyLength, bodyWidth);
+        // Getragenes Blatt vor dem Kopf zeichnen
+        if (q.carrying && state.images.leaf) {
+            const ls = CONFIG.LEAF_SIZE;
+            ctx.drawImage(state.images.leaf, bodyLength / 2 + 4, -ls / 2, ls, ls);
+        }
         ctx.restore();
     }
 
@@ -1026,6 +1110,17 @@
             ctx.fill();
         }
 
+        // Futter auf Minimap
+        if (state.food) {
+            ctx.globalAlpha = 0.9;
+            ctx.fillStyle = '#4CAF50';
+            const foodMapX = x + (state.food.x / CONFIG.WORLD_WIDTH) * mapW;
+            const foodMapY = y + (state.food.y / CONFIG.WORLD_HEIGHT) * mapH;
+            ctx.beginPath();
+            ctx.arc(foodMapX, foodMapY, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
         // Koenigin auf Minimap
         ctx.globalAlpha = 1;
         const queenMapX = x + (state.queen.x / CONFIG.WORLD_WIDTH) * mapW;
@@ -1062,6 +1157,7 @@
             ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
             drawGrass();
             drawHoles();
+            drawFood();
             drawTargetMarker();
             drawQueen();
             drawDigIndicator();
@@ -1076,6 +1172,7 @@
 
     // --- Start ---
     loadAssets();
+    spawnFoodPile();
     gameLoop();
 
     // --- Service Worker registrieren ---
