@@ -73,9 +73,11 @@
             goingToHole: false, // Laeuft zu einem fertigen Loch um hineinzugehen
             carrying: false,   // Traegt gerade ein Blatt
             goingToLeaf: false, // Laeuft zu einem Blatt um es aufzuheben
+            goingToDrop: false, // Laeuft zu einer Stelle um Blatt abzulegen
         },
         holes: [], // Array von {x, y} - gegrabene Loecher
         food: null, // Aktueller Blatterhaufen: {x, y, leaves: [{ox, oy, angle}], count: n}
+        droppedLeaves: [],  // Abgelegte Blaetter auf der Oberflaeche: [{x, y, angle}]
         underground: {
             active: false,
             camX: 0, camY: 0,
@@ -90,6 +92,9 @@
             lastTapTime: 0,            // Doppelklick-Erkennung im Untergrund
             lastTapX: 0,
             lastTapY: 0,
+            carrying: false,           // Traegt ein Blatt im Untergrund
+            goingToDrop: false,        // Laeuft zu Ablage-Stelle im Untergrund
+            droppedLeaves: [],         // Abgelegte Blaetter im Untergrund: [{x, y, angle}]
         }, // Untergrund-Ansicht
         doubleTap: {
             lastTime: 0, // Zeitpunkt des letzten Taps
@@ -370,11 +375,32 @@
             const tapDist = Math.sqrt(tapDx * tapDx + tapDy * tapDy);
 
             if (dt < CONFIG.DOUBLE_TAP_DELAY && tapDist < CONFIG.DOUBLE_TAP_RADIUS) {
+                u.lastTapTime = 0;
+                // Wenn Ameise im Untergrund traegt: Doppelklick = Blatt in Tunnel ablegen
+                if (u.carrying) {
+                    if (u.currentDig) {
+                        u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                        u.currentDig = null;
+                    }
+                    const cp = closestPointOnTunnels(worldX, worldY, u.tunnels);
+                    if (cp.dist <= CONFIG.TUNNEL_RADIUS * 2.5) {
+                        const sp = closestPointOnTunnels(u.queenX, u.queenY, u.tunnels);
+                        const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : u.queenX;
+                        const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : u.queenY;
+                        const dropPath = findTunnelPath(startX, startY, cp.x, cp.y, u.tunnels);
+                        if (dropPath) {
+                            u.path = dropPath;
+                            u.moving = true;
+                            u.goingToExit = false;
+                            u.goingToDrop = true;
+                        }
+                    }
+                    return;
+                }
                 // Doppelklick: laufendes Graben abschliessen, neues Graben in gerader Linie starten
                 if (u.currentDig) {
                     u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
                 }
-                u.lastTapTime = 0;
                 const tx = Math.max(0, Math.min(worldX, CONFIG.UNDERGROUND_WIDTH));
                 const ty = Math.max(u.exitY, Math.min(worldY, CONFIG.UNDERGROUND_HEIGHT));
                 u.currentDig = {x1: u.queenX, y1: u.queenY};
@@ -439,8 +465,21 @@
 
         if (dt < CONFIG.DOUBLE_TAP_DELAY && dist < CONFIG.DOUBLE_TAP_RADIUS) {
             state.doubleTap.lastTime = 0; // Reset damit kein Triple-Tap ausloest
+            // Wenn Ameise traegt: Doppelklick = hinlaufen und Blatt ablegen
+            if (state.queen.carrying) {
+                state.queen.targetX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
+                state.queen.targetY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
+                state.queen.moving = true;
+                state.queen.digging = false;
+                state.queen.digX = null;
+                state.queen.digY = null;
+                state.queen.goingToHole = false;
+                state.queen.goingToLeaf = false;
+                state.queen.goingToDrop = true;
+                return;
+            }
             // Doppelklick auf Blaetterhaufen -> Blatt aufheben
-            if (state.food && state.food.leaves.length > 0 && !state.queen.carrying) {
+            if (state.food && state.food.leaves.length > 0) {
                 const fdx = worldX - state.food.x;
                 const fdy = worldY - state.food.y;
                 const foodRadius = CONFIG.LEAF_SCATTER * Math.sqrt(state.food.count / 10) + CONFIG.LEAF_SIZE;
@@ -695,6 +734,9 @@
                 const viewH = canvas.height / CONFIG.ZOOM;
                 u.camX = Math.max(0, Math.min(u.exitX - viewW / 2, CONFIG.UNDERGROUND_WIDTH - viewW));
                 u.camY = 0;
+                // Trage-Zustand von Oberflaeche in Untergrund uebernehmen
+                u.carrying = q.carrying;
+                q.carrying = false;
                 u.active = true;
             }
             // Wenn Ameise beim Blaetterhaufen angekommen -> Blatt aufheben
@@ -707,6 +749,14 @@
                     if (state.food.leaves.length === 0) {
                         spawnFoodPile();
                     }
+                }
+            }
+            // Wenn Ameise an Ablage-Stelle angekommen -> Blatt ablegen
+            if (q.goingToDrop) {
+                q.goingToDrop = false;
+                if (q.carrying) {
+                    state.droppedLeaves.push({ x: q.x, y: q.y, angle: Math.random() * Math.PI * 2 });
+                    q.carrying = false;
                 }
             }
             return;
@@ -748,8 +798,19 @@
                     u.currentDig = null;
                 }
                 u.moving = false;
+                // Blatt im Untergrund ablegen
+                if (u.goingToDrop) {
+                    u.goingToDrop = false;
+                    if (u.carrying) {
+                        u.droppedLeaves.push({ x: u.queenX, y: u.queenY, angle: Math.random() * Math.PI * 2 });
+                        u.carrying = false;
+                    }
+                }
                 if (u.goingToExit) {
                     u.goingToExit = false;
+                    // Trage-Zustand von Untergrund zur Oberflaeche uebernehmen
+                    state.queen.carrying = u.carrying;
+                    u.carrying = false;
                     u.active = false; // Zurueck zur Oberflaechenansicht
                 }
             }
@@ -819,6 +880,22 @@
         }
     }
 
+    function drawDroppedLeaves() {
+        const img = state.images.leaf;
+        if (!img) return;
+        const size = CONFIG.LEAF_SIZE;
+        for (let i = 0; i < state.droppedLeaves.length; i++) {
+            const leaf = state.droppedLeaves[i];
+            const lx = leaf.x - state.camera.x;
+            const ly = leaf.y - state.camera.y;
+            ctx.save();
+            ctx.translate(lx, ly);
+            ctx.rotate(leaf.angle);
+            ctx.drawImage(img, -size / 2, -size / 2, size, size);
+            ctx.restore();
+        }
+    }
+
     function drawDigIndicator() {
         const q = state.queen;
         if (!q.digging || q.digTimer <= 0 || q.moving) return;
@@ -859,8 +936,8 @@
         ctx.drawImage(img, -bodyLength / 2, -bodyWidth / 2, bodyLength, bodyWidth);
         // Getragenes Blatt vor dem Kopf zeichnen
         if (q.carrying && state.images.leaf) {
-            const ls = CONFIG.LEAF_SIZE;
-            ctx.drawImage(state.images.leaf, bodyLength / 2 + 4, -ls / 2, ls, ls);
+            const ls = CONFIG.LEAF_SIZE * 0.45; // Kleiner beim Tragen
+            ctx.drawImage(state.images.leaf, bodyLength / 2 - ls * 0.3, -ls / 2, ls, ls);
         }
         ctx.restore();
     }
@@ -1044,6 +1121,19 @@
             ctx.restore();
         }
 
+        // --- Abgelegte Blaetter im Untergrund ---
+        if (state.images.leaf && u.droppedLeaves.length > 0) {
+            const leafSize = CONFIG.LEAF_SIZE;
+            for (let i = 0; i < u.droppedLeaves.length; i++) {
+                const dl = u.droppedLeaves[i];
+                ctx.save();
+                ctx.translate(dl.x - camX, dl.y - camY);
+                ctx.rotate(dl.angle);
+                ctx.drawImage(state.images.leaf, -leafSize / 2, -leafSize / 2, leafSize, leafSize);
+                ctx.restore();
+            }
+        }
+
         // --- Ameise im Untergrund ---
         const queenImg = state.images.queen;
         if (queenImg) {
@@ -1055,6 +1145,11 @@
             ctx.translate(scrX, scrY);
             ctx.rotate(u.queenAngle);
             ctx.drawImage(queenImg, -bodyLength / 2, -bodyWidth / 2, bodyLength, bodyWidth);
+            // Getragenes Blatt im Untergrund
+            if (u.carrying && state.images.leaf) {
+                const ls = CONFIG.LEAF_SIZE * 0.45;
+                ctx.drawImage(state.images.leaf, bodyLength / 2 - ls * 0.3, -ls / 2, ls, ls);
+            }
             ctx.restore();
         }
 
@@ -1158,6 +1253,7 @@
             drawGrass();
             drawHoles();
             drawFood();
+            drawDroppedLeaves();
             drawTargetMarker();
             drawQueen();
             drawDigIndicator();
