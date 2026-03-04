@@ -38,8 +38,8 @@
         TUNNEL_RADIUS: 50,         // Halbe Breite eines Gangs in Welt-Pixeln
 
         // Futter (Blaetter)
-        LEAF_SIZE: 36,             // Anzeige-Groesse eines Blattes in Pixeln
-        LEAF_SCATTER: 40,          // Max Streuung der Blaetter im Haufen
+        LEAF_SIZE: 64,             // Anzeige-Groesse eines Blattes in Pixeln
+        LEAF_SCATTER: 55,          // Max Streuung der Blaetter im Haufen
         LEAF_CARRY_OFFSET: 50,     // Abstand des getragenen Blatts vor dem Kopf
     };
 

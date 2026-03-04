@@ -1,9 +1,9 @@
 // Service Worker fuer Offline-Funktionalitaet
-const CACHE_NAME = 'ameisensimulator-v15';
+const CACHE_NAME = 'ameisensimulator-v16';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
-    './game.js?v=14',
+    './game.js?v=15',
     './manifest.json',
     './assets/images/grass.png',
     './assets/images/queen.png',
