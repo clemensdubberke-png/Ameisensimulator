@@ -41,6 +41,15 @@
         LEAF_SIZE: 110,            // Anzeige-Groesse eines Blattes in Pixeln
         LEAF_SCATTER: 80,          // Max Streuung der Blaetter im Haufen
         LEAF_CARRY_OFFSET: 50,     // Abstand des getragenen Blatts vor dem Kopf
+
+        // Brut-System
+        EGG_INTERVAL: 1200,        // Frames zwischen Eiern (20 Sekunden bei 60fps)
+        MAX_EGGS: 10,              // Maximale Anzahl Eier
+        EGG_SIZE: 50,              // Anzeige-Groesse eines Eis
+        PUPA_SIZE: 60,             // Anzeige-Groesse einer Puppe
+        WORKER_SIZE: 64,           // Anzeige-Groesse einer Arbeiter-Ameise (kleiner als Koenigin)
+        WORKER_SPEED: 2.5,        // Geschwindigkeit der Arbeiter-Ameisen
+        LONG_PRESS_DELAY: 600,    // Millisekunden fuer Long-Press
     };
 
     // --- Canvas Setup ---
@@ -117,6 +126,26 @@
         },
         images: {},
         loaded: false,
+        // Brut-System
+        brood: {
+            started: false,        // Brut gestartet (Fluegel abgeworfen)
+            wingless: false,       // Koenigin hat Fluegel verloren
+            eggTimer: 0,           // Frame-Counter bis naechstes Ei
+            eggs: [],              // Eier im Untergrund: [{x, y}]
+            pupae: [],             // Puppen im Untergrund: [{x, y}]
+            workers: [],           // Fertige Arbeiter-Ameisen (Untergrund + Oberflaeche)
+            // workers: [{x, y, angle, state, targetX, targetY, carrying, underground, path, ...}]
+        },
+        // Long-Press Erkennung
+        longPress: {
+            timer: null,
+            active: false,
+        },
+        // Popup-Menue
+        popup: {
+            visible: false,
+            x: 0, y: 0,           // Screen-Position des Popups
+        },
     };
 
     // --- Bilder laden ---
@@ -150,6 +179,16 @@
             loadImage('assets/images/underground_deep.png')
                 .then(img => { state.images.underground_deep = img; })
                 .catch(() => { /* Datei noch nicht vorhanden - Untergrund zeigt nur den oberen Streifen */ });
+            // Brut-Grafiken laden
+            loadImage('assets/images/queen_wingless.png')
+                .then(img => { state.images.queen_wingless = img; })
+                .catch(() => { /* Platzhalter: nutze queen.png */ });
+            loadImage('assets/images/egg.png')
+                .then(img => { state.images.egg = img; })
+                .catch(() => { });
+            loadImage('assets/images/pupa.png')
+                .then(img => { state.images.pupa = img; })
+                .catch(() => { });
         } catch (e) {
             document.getElementById('loading').innerHTML =
                 '<div style="text-align:center;padding:20px;">' +
@@ -626,12 +665,75 @@
         };
     }
 
+    // --- Long-Press Hilfsfunktionen ---
+    function startLongPressCheck(screenX, screenY) {
+        cancelLongPress();
+        if (!state.underground.active || state.brood.started) return;
+        // Prüfe ob auf die Koenigin geklickt wurde
+        const u = state.underground;
+        const worldX = screenX / CONFIG.ZOOM + u.camX;
+        const worldY = screenY / CONFIG.ZOOM + u.camY;
+        const dx = worldX - u.queenX;
+        const dy = worldY - u.queenY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < CONFIG.QUEEN_SIZE) {
+            state.longPress.timer = setTimeout(() => {
+                state.longPress.active = true;
+                // Popup anzeigen
+                state.popup.visible = true;
+                state.popup.x = screenX;
+                state.popup.y = screenY;
+            }, CONFIG.LONG_PRESS_DELAY);
+        }
+    }
+
+    function cancelLongPress() {
+        if (state.longPress.timer) {
+            clearTimeout(state.longPress.timer);
+            state.longPress.timer = null;
+        }
+        state.longPress.active = false;
+    }
+
+    function handlePopupClick(screenX, screenY) {
+        if (!state.popup.visible) return false;
+        const dpr = window.devicePixelRatio;
+        const px = state.popup.x;
+        const py = state.popup.y;
+        const boxW = 260 * dpr;
+        const boxH = 120 * dpr;
+        const boxX = px - boxW / 2;
+        const boxY = py - boxH - 20 * dpr;
+        // Button-Position innerhalb der Box
+        const btnW = 200 * dpr;
+        const btnH = 50 * dpr;
+        const btnX = px - btnW / 2;
+        const btnY = boxY + 50 * dpr;
+        if (screenX >= btnX && screenX <= btnX + btnW && screenY >= btnY && screenY <= btnY + btnH) {
+            // Brut starten!
+            state.brood.started = true;
+            state.brood.wingless = true;
+            state.brood.eggTimer = CONFIG.EGG_INTERVAL;
+            state.popup.visible = false;
+            return true;
+        }
+        // Klick ausserhalb -> Popup schliessen
+        state.popup.visible = false;
+        return true;
+    }
+
     canvas.addEventListener('touchstart', (e) => {
         e.preventDefault();
         if (state.touch.active) return;
 
         const touch = e.changedTouches[0];
         const scaled = getScaledTouch(touch);
+
+        // Popup-Klick prüfen
+        if (state.popup.visible) {
+            handlePopupClick(scaled.x, scaled.y);
+            return;
+        }
 
         state.touch.active = true;
         state.touch.identifier = touch.identifier;
@@ -643,6 +745,8 @@
         // Je nach Ansicht den richtigen Kamera-Startpunkt merken
         state.touch.cameraStartX = state.underground.active ? state.underground.camX : state.camera.x;
         state.touch.cameraStartY = state.underground.active ? state.underground.camY : state.camera.y;
+        // Long-Press starten
+        startLongPressCheck(scaled.x, scaled.y);
     }, { passive: false });
 
     canvas.addEventListener('touchmove', (e) => {
@@ -664,6 +768,7 @@
 
         if (dist > CONFIG.TAP_THRESHOLD) {
             state.touch.isDragging = true;
+            cancelLongPress();
             if (state.underground.active) {
                 state.underground.camX = state.touch.cameraStartX - dx / CONFIG.ZOOM;
                 state.underground.camY = state.touch.cameraStartY - dy / CONFIG.ZOOM;
@@ -676,6 +781,7 @@
 
     canvas.addEventListener('touchend', (e) => {
         e.preventDefault();
+        cancelLongPress();
         const touch = Array.from(e.changedTouches).find(
             (t) => t.identifier === state.touch.identifier
         );
@@ -703,6 +809,7 @@
 
     // Auch Touchcancel behandeln
     canvas.addEventListener('touchcancel', (e) => {
+        cancelLongPress();
         state.touch.active = false;
         state.touch.isDragging = false;
         state.touch.identifier = null;
@@ -715,12 +822,21 @@
     let mouseCamStartX = 0, mouseCamStartY = 0;
 
     canvas.addEventListener('mousedown', (e) => {
+        const mx = e.clientX * window.devicePixelRatio;
+        const my = e.clientY * window.devicePixelRatio;
+        // Popup-Klick prüfen
+        if (state.popup.visible) {
+            handlePopupClick(mx, my);
+            return;
+        }
         mouseDown = true;
-        mouseStartX = e.clientX * window.devicePixelRatio;
-        mouseStartY = e.clientY * window.devicePixelRatio;
+        mouseStartX = mx;
+        mouseStartY = my;
         mouseDragging = false;
         mouseCamStartX = state.underground.active ? state.underground.camX : state.camera.x;
         mouseCamStartY = state.underground.active ? state.underground.camY : state.camera.y;
+        // Long-Press starten
+        startLongPressCheck(mx, my);
     });
 
     canvas.addEventListener('mousemove', (e) => {
@@ -733,6 +849,7 @@
 
         if (dist > CONFIG.TAP_THRESHOLD) {
             mouseDragging = true;
+            cancelLongPress();
             if (state.underground.active) {
                 state.underground.camX = mouseCamStartX - dx / CONFIG.ZOOM;
                 state.underground.camY = mouseCamStartY - dy / CONFIG.ZOOM;
@@ -744,6 +861,7 @@
     });
 
     canvas.addEventListener('mouseup', (e) => {
+        cancelLongPress();
         if (!mouseDragging) {
             const mx = e.clientX * window.devicePixelRatio;
             const my = e.clientY * window.devicePixelRatio;
@@ -1032,7 +1150,7 @@
     }
 
     function drawQueen() {
-        const img = state.images.queen;
+        const img = (state.brood.wingless && state.images.queen_wingless) ? state.images.queen_wingless : state.images.queen;
         if (!img) return;
 
         const q = state.queen;
@@ -1248,8 +1366,11 @@
             }
         }
 
+        // --- Brut-Elemente (Eier, Puppen, Arbeiter) ---
+        drawBroodUnderground();
+
         // --- Ameise im Untergrund ---
-        const queenImg = state.images.queen;
+        const queenImg = (state.brood.wingless && state.images.queen_wingless) ? state.images.queen_wingless : state.images.queen;
         if (queenImg) {
             const scrX = u.queenX - camX;
             const scrY = u.queenY - camY;
@@ -1342,6 +1463,405 @@
         ctx.restore();
     }
 
+    // --- Brut-System Update ---
+    function updateBrood() {
+        if (!state.brood.started) return;
+        const u = state.underground;
+        const b = state.brood;
+
+        // Koenigin legt Eier (nur wenn im Untergrund aktiv)
+        if (u.active) {
+            b.eggTimer--;
+            if (b.eggTimer <= 0 && (b.eggs.length + b.pupae.length + b.workers.length) < CONFIG.MAX_EGGS) {
+                // Ei direkt bei der Koenigin ablegen
+                b.eggs.push({ x: u.queenX + (Math.random() - 0.5) * 40, y: u.queenY + (Math.random() - 0.5) * 40 });
+                b.eggTimer = CONFIG.EGG_INTERVAL;
+            } else if (b.eggTimer <= 0) {
+                b.eggTimer = CONFIG.EGG_INTERVAL; // Reset auch wenn max erreicht
+            }
+        }
+
+        // Entwicklung: Futter im Untergrund verbrauchen
+        // Ei -> Puppe (braucht 1 Futter)
+        if (b.eggs.length > 0 && u.droppedLeaves.length > 0) {
+            const egg = b.eggs.shift();
+            u.droppedLeaves.shift(); // Futter verbrauchen
+            b.pupae.push({ x: egg.x, y: egg.y });
+        }
+
+        // Puppe -> Arbeiter-Ameise (braucht 1 Futter)
+        if (b.pupae.length > 0 && u.droppedLeaves.length > 0) {
+            const pupa = b.pupae.shift();
+            u.droppedLeaves.shift(); // Futter verbrauchen
+            b.workers.push({
+                x: pupa.x, y: pupa.y,
+                angle: Math.random() * Math.PI * 2,
+                surfaceX: state.queen.x, surfaceY: state.queen.y,
+                state: 'underground_idle', // underground_idle -> going_exit -> surface_to_food -> surface_to_hole -> underground_to_drop -> underground_idle (Zyklus)
+                carrying: false,
+                underground: true,
+                path: [],
+                moving: false,
+                targetX: null, targetY: null,
+            });
+        }
+    }
+
+    // --- Arbeiter-Ameisen Update ---
+    function updateWorkers() {
+        if (!state.brood.started) return;
+        const u = state.underground;
+        const b = state.brood;
+
+        for (let i = 0; i < b.workers.length; i++) {
+            const w = b.workers[i];
+            updateSingleWorker(w);
+        }
+    }
+
+    function updateSingleWorker(w) {
+        const u = state.underground;
+        const speed = CONFIG.WORKER_SPEED;
+
+        switch (w.state) {
+            case 'underground_idle': {
+                // Zum Ausgang laufen
+                const sp = closestPointOnTunnels(w.x, w.y, u.tunnels);
+                const ep = closestPointOnTunnels(u.exitX, u.exitY + 15, u.tunnels);
+                const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : w.x;
+                const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : w.y;
+                const exitPath = findTunnelPath(startX, startY, ep.x, ep.y, u.tunnels);
+                if (exitPath && exitPath.length > 0) {
+                    w.path = exitPath;
+                    w.state = 'going_exit';
+                    w.moving = true;
+                } else {
+                    // Direkt zum Ausgang
+                    w.path = [{x: u.exitX, y: u.exitY + 15}];
+                    w.state = 'going_exit';
+                    w.moving = true;
+                }
+                break;
+            }
+            case 'going_exit': {
+                if (w.path.length === 0) {
+                    // Am Ausgang angekommen -> zur Oberflaeche wechseln
+                    w.underground = false;
+                    // Finde das naechste Loch auf der Oberflaeche
+                    if (state.holes.length > 0) {
+                        const hole = state.holes[0];
+                        w.x = hole.x;
+                        w.y = hole.y;
+                    } else {
+                        w.x = CONFIG.WORLD_WIDTH / 2;
+                        w.y = CONFIG.WORLD_HEIGHT / 2;
+                    }
+                    w.state = 'surface_to_food';
+                    w.moving = false;
+                    break;
+                }
+                moveAlongPath(w, speed);
+                break;
+            }
+            case 'surface_to_food': {
+                // Zum Futter laufen
+                if (!w.moving) {
+                    if (state.food && state.food.leaves.length > 0) {
+                        const leaf = state.food.leaves[0];
+                        w.targetX = state.food.x + leaf.ox;
+                        w.targetY = state.food.y + leaf.oy;
+                        w.moving = true;
+                    }
+                    break;
+                }
+                // Zum Ziel bewegen
+                if (w.targetX !== null) {
+                    const dx = w.targetX - w.x;
+                    const dy = w.targetY - w.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < CONFIG.MOVE_DEAD_ZONE) {
+                        // Angekommen -> Blatt aufheben
+                        w.moving = false;
+                        w.targetX = null;
+                        w.targetY = null;
+                        if (state.food && state.food.leaves.length > 0) {
+                            state.food.leaves.shift();
+                            w.carrying = true;
+                            if (state.food.leaves.length === 0) {
+                                spawnFoodPile();
+                            }
+                        }
+                        w.state = 'surface_to_hole';
+                    } else {
+                        w.angle = Math.atan2(dy, dx);
+                        w.x += (dx / dist) * speed;
+                        w.y += (dy / dist) * speed;
+                    }
+                }
+                break;
+            }
+            case 'surface_to_hole': {
+                // Zum naechsten Loch laufen
+                if (!w.moving) {
+                    if (state.holes.length > 0) {
+                        // Naechstes Loch finden
+                        let bestHole = state.holes[0];
+                        let bestDist = Infinity;
+                        for (const h of state.holes) {
+                            const dx = w.x - h.x;
+                            const dy = w.y - h.y;
+                            const d = dx * dx + dy * dy;
+                            if (d < bestDist) { bestDist = d; bestHole = h; }
+                        }
+                        w.targetX = bestHole.x;
+                        w.targetY = bestHole.y;
+                        w.moving = true;
+                    }
+                    break;
+                }
+                if (w.targetX !== null) {
+                    const dx = w.targetX - w.x;
+                    const dy = w.targetY - w.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < CONFIG.MOVE_DEAD_ZONE) {
+                        // Am Loch angekommen -> in Untergrund wechseln
+                        w.moving = false;
+                        w.targetX = null;
+                        w.targetY = null;
+                        w.underground = true;
+                        w.x = u.exitX;
+                        w.y = u.exitY + 62;
+                        w.state = 'underground_to_drop';
+                    } else {
+                        w.angle = Math.atan2(dy, dx);
+                        w.x += (dx / dist) * speed;
+                        w.y += (dy / dist) * speed;
+                    }
+                }
+                break;
+            }
+            case 'underground_to_drop': {
+                // Im Untergrund Futter ablegen (etwas weiter unten)
+                if (w.path.length === 0 && !w.moving) {
+                    // Ziel: etwas tiefer im Tunnel ablegen
+                    const dropY = u.exitY + 200 + Math.random() * 100;
+                    const cp = closestPointOnTunnels(u.exitX, dropY, u.tunnels);
+                    const sp = closestPointOnTunnels(w.x, w.y, u.tunnels);
+                    const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : w.x;
+                    const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : w.y;
+                    const dropPath = findTunnelPath(startX, startY, cp.x, cp.y, u.tunnels);
+                    if (dropPath && dropPath.length > 0) {
+                        w.path = dropPath;
+                        w.moving = true;
+                    } else {
+                        // Kein Pfad -> direkt ablegen
+                        if (w.carrying) {
+                            u.droppedLeaves.push({ x: w.x, y: w.y, angle: Math.random() * Math.PI * 2 });
+                            w.carrying = false;
+                        }
+                        w.state = 'underground_idle';
+                    }
+                    break;
+                }
+                if (w.path.length === 0) {
+                    // Angekommen -> Futter ablegen
+                    w.moving = false;
+                    if (w.carrying) {
+                        u.droppedLeaves.push({ x: w.x, y: w.y, angle: Math.random() * Math.PI * 2 });
+                        w.carrying = false;
+                    }
+                    w.state = 'underground_idle';
+                    break;
+                }
+                moveAlongPath(w, speed);
+                break;
+            }
+        }
+    }
+
+    function moveAlongPath(w, speed) {
+        if (w.path.length === 0) return;
+        const wp = w.path[0];
+        const dx = wp.x - w.x;
+        const dy = wp.y - w.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < CONFIG.MOVE_DEAD_ZONE) {
+            w.x = wp.x;
+            w.y = wp.y;
+            w.path.shift();
+        } else {
+            w.angle = Math.atan2(dy, dx);
+            w.x += (dx / dist) * speed;
+            w.y += (dy / dist) * speed;
+        }
+    }
+
+    // --- Popup zeichnen ---
+    function drawPopup() {
+        if (!state.popup.visible) return;
+        const dpr = window.devicePixelRatio;
+        const px = state.popup.x;
+        const py = state.popup.y;
+
+        // Hintergrund-Overlay
+        ctx.save();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Popup-Box
+        const boxW = 260 * dpr;
+        const boxH = 120 * dpr;
+        const boxX = px - boxW / 2;
+        const boxY = py - boxH - 20 * dpr;
+
+        // Schatten
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.beginPath();
+        ctx.roundRect(boxX + 4 * dpr, boxY + 4 * dpr, boxW, boxH, 12 * dpr);
+        ctx.fill();
+
+        // Box
+        ctx.fillStyle = '#2a1a08';
+        ctx.beginPath();
+        ctx.roundRect(boxX, boxY, boxW, boxH, 12 * dpr);
+        ctx.fill();
+
+        ctx.strokeStyle = '#c49030';
+        ctx.lineWidth = 2 * dpr;
+        ctx.beginPath();
+        ctx.roundRect(boxX, boxY, boxW, boxH, 12 * dpr);
+        ctx.stroke();
+
+        // Text
+        ctx.fillStyle = '#ffdd88';
+        ctx.font = 'bold ' + (16 * dpr) + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('Koenigin', px, boxY + 30 * dpr);
+
+        // Button "Brut starten"
+        const btnW = 200 * dpr;
+        const btnH = 50 * dpr;
+        const btnX = px - btnW / 2;
+        const btnY = boxY + 50 * dpr;
+
+        // Speichere Button-Position fuer Klick-Erkennung
+        state.popup.x = px;
+        state.popup.y = py;
+
+        ctx.fillStyle = '#4a7a2a';
+        ctx.beginPath();
+        ctx.roundRect(btnX, btnY, btnW, btnH, 8 * dpr);
+        ctx.fill();
+
+        ctx.strokeStyle = '#6aaa3a';
+        ctx.lineWidth = 2 * dpr;
+        ctx.beginPath();
+        ctx.roundRect(btnX, btnY, btnW, btnH, 8 * dpr);
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold ' + (15 * dpr) + 'px monospace';
+        ctx.fillText('Brut starten', px, btnY + btnH / 2 + 5 * dpr);
+
+        ctx.restore();
+    }
+
+    // --- Brut-Elemente im Untergrund zeichnen ---
+    function drawBroodUnderground() {
+        if (!state.brood.started) return;
+        const u = state.underground;
+        const b = state.brood;
+        const camX = u.camX;
+        const camY = u.camY;
+
+        // Eier zeichnen
+        const eggImg = state.images.egg;
+        const eggSize = CONFIG.EGG_SIZE;
+        for (let i = 0; i < b.eggs.length; i++) {
+            const egg = b.eggs[i];
+            const sx = egg.x - camX;
+            const sy = egg.y - camY;
+            if (eggImg) {
+                ctx.drawImage(eggImg, sx - eggSize / 2, sy - eggSize / 2, eggSize, eggSize);
+            } else {
+                // Fallback: einfacher Kreis
+                ctx.fillStyle = '#f0e8d0';
+                ctx.beginPath();
+                ctx.ellipse(sx, sy, eggSize / 2, eggSize / 3, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // Puppen zeichnen
+        const pupaImg = state.images.pupa;
+        const pupaSize = CONFIG.PUPA_SIZE;
+        for (let i = 0; i < b.pupae.length; i++) {
+            const pupa = b.pupae[i];
+            const sx = pupa.x - camX;
+            const sy = pupa.y - camY;
+            if (pupaImg) {
+                ctx.drawImage(pupaImg, sx - pupaSize / 2, sy - pupaSize / 2, pupaSize, pupaSize);
+            } else {
+                // Fallback
+                ctx.fillStyle = '#d4c8a8';
+                ctx.beginPath();
+                ctx.ellipse(sx, sy, pupaSize / 2, pupaSize / 3, 0.3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // Arbeiter-Ameisen im Untergrund zeichnen
+        const workerImg = state.images.queen_wingless || state.images.queen;
+        const wSize = CONFIG.WORKER_SIZE;
+        const wLength = wSize * 1.5;
+        const wWidth = wSize;
+        for (let i = 0; i < b.workers.length; i++) {
+            const w = b.workers[i];
+            if (!w.underground) continue;
+            const sx = w.x - camX;
+            const sy = w.y - camY;
+            ctx.save();
+            ctx.translate(sx, sy);
+            ctx.rotate(w.angle);
+            ctx.drawImage(workerImg, -wLength / 2, -wWidth / 2, wLength, wWidth);
+            // Getragenes Blatt
+            if (w.carrying && state.images.leaf) {
+                const ls = CONFIG.LEAF_SIZE * 0.7;
+                ctx.drawImage(state.images.leaf, wLength / 2 - ls * 0.65, -ls / 2, ls, ls);
+            }
+            ctx.restore();
+        }
+    }
+
+    // --- Arbeiter auf der Oberflaeche zeichnen ---
+    function drawWorkersOverworld() {
+        if (!state.brood.started) return;
+        const b = state.brood;
+        const workerImg = state.images.queen_wingless || state.images.queen;
+        if (!workerImg) return;
+
+        const wSize = CONFIG.WORKER_SIZE;
+        const wLength = wSize * 1.5;
+        const wWidth = wSize;
+
+        for (let i = 0; i < b.workers.length; i++) {
+            const w = b.workers[i];
+            if (w.underground) continue;
+            const sx = w.x - state.camera.x;
+            const sy = w.y - state.camera.y;
+            ctx.save();
+            ctx.translate(sx, sy);
+            ctx.rotate(w.angle);
+            ctx.drawImage(workerImg, -wLength / 2, -wWidth / 2, wLength, wWidth);
+            // Getragenes Blatt
+            if (w.carrying && state.images.leaf) {
+                const ls = CONFIG.LEAF_SIZE * 0.7;
+                ctx.drawImage(state.images.leaf, wLength / 2 - ls * 0.65, -ls / 2, ls, ls);
+            }
+            ctx.restore();
+        }
+    }
+
     // --- Hauptschleife ---
     function gameLoop() {
         if (!state.loaded) {
@@ -1351,6 +1871,10 @@
 
         // Rendern
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Brut-System und Arbeiter immer updaten
+        updateBrood();
+        updateWorkers();
 
         if (state.underground.active) {
             // Untergrund-Ansicht: Ameise bewegen, Kamera folgt
@@ -1369,6 +1893,7 @@
             drawFood();
             drawDroppedLeaves();
             drawTargetMarker();
+            drawWorkersOverworld();
             drawQueen();
             drawDigIndicator();
             ctx.restore();
@@ -1376,6 +1901,9 @@
             // Minimap ohne Zoom zeichnen
             drawMinimap();
         }
+
+        // Popup immer über allem zeichnen
+        drawPopup();
 
         requestAnimationFrame(gameLoop);
     }
