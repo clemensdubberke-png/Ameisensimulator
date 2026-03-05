@@ -383,7 +383,7 @@
                         u.currentDig = null;
                     }
                     const cp = closestPointOnTunnels(worldX, worldY, u.tunnels);
-                    if (cp.dist <= CONFIG.TUNNEL_RADIUS * 2.5) {
+                    if (cp.dist < Infinity) {
                         const sp = closestPointOnTunnels(u.queenX, u.queenY, u.tunnels);
                         const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : u.queenX;
                         const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : u.queenY;
@@ -393,7 +393,15 @@
                             u.moving = true;
                             u.goingToExit = false;
                             u.goingToDrop = true;
+                        } else {
+                            // Kein Pfad gefunden -> direkt ablegen
+                            u.droppedLeaves.push({ x: u.queenX, y: u.queenY, angle: Math.random() * Math.PI * 2 });
+                            u.carrying = false;
                         }
+                    } else {
+                        // Keine Tunnel vorhanden -> direkt ablegen
+                        u.droppedLeaves.push({ x: u.queenX, y: u.queenY, angle: Math.random() * Math.PI * 2 });
+                        u.carrying = false;
                     }
                     return;
                 }
@@ -480,18 +488,34 @@
             }
             // Doppelklick auf Blaetterhaufen -> Blatt aufheben
             if (state.food && state.food.leaves.length > 0) {
-                const fdx = worldX - state.food.x;
-                const fdy = worldY - state.food.y;
-                const foodRadius = CONFIG.LEAF_SCATTER * Math.sqrt(state.food.count / 10) + CONFIG.LEAF_SIZE;
-                if (Math.sqrt(fdx * fdx + fdy * fdy) < foodRadius) {
-                    state.queen.targetX = state.food.x;
-                    state.queen.targetY = state.food.y;
+                // Naechstes Blatt zum Klickpunkt finden
+                let bestIdx = -1;
+                let bestDist = Infinity;
+                for (let i = 0; i < state.food.leaves.length; i++) {
+                    const leaf = state.food.leaves[i];
+                    const lx = state.food.x + leaf.ox;
+                    const ly = state.food.y + leaf.oy;
+                    const ldx = worldX - lx;
+                    const ldy = worldY - ly;
+                    const ld = Math.sqrt(ldx * ldx + ldy * ldy);
+                    if (ld < bestDist) {
+                        bestDist = ld;
+                        bestIdx = i;
+                    }
+                }
+                if (bestIdx >= 0 && bestDist < CONFIG.LEAF_SIZE * 1.5) {
+                    const chosenLeaf = state.food.leaves[bestIdx];
+                    const leafWorldX = state.food.x + chosenLeaf.ox;
+                    const leafWorldY = state.food.y + chosenLeaf.oy;
+                    state.queen.targetX = leafWorldX;
+                    state.queen.targetY = leafWorldY;
                     state.queen.moving = true;
                     state.queen.digging = false;
                     state.queen.digX = null;
                     state.queen.digY = null;
                     state.queen.goingToHole = false;
                     state.queen.goingToLeaf = true;
+                    state.queen._pickLeafIdx = bestIdx; // Merke welches Blatt aufgehoben wird
                     return;
                 }
             }
@@ -743,7 +767,14 @@
             if (q.goingToLeaf) {
                 q.goingToLeaf = false;
                 if (state.food && state.food.leaves.length > 0) {
-                    state.food.leaves.pop();
+                    // Bestimmtes Blatt entfernen (das angeklickte)
+                    const idx = q._pickLeafIdx;
+                    if (idx >= 0 && idx < state.food.leaves.length) {
+                        state.food.leaves.splice(idx, 1);
+                    } else {
+                        state.food.leaves.pop();
+                    }
+                    q._pickLeafIdx = -1;
                     q.carrying = true;
                     // Haufen leer -> neuen spawnen
                     if (state.food.leaves.length === 0) {
@@ -936,7 +967,7 @@
         ctx.drawImage(img, -bodyLength / 2, -bodyWidth / 2, bodyLength, bodyWidth);
         // Getragenes Blatt vor dem Kopf zeichnen
         if (q.carrying && state.images.leaf) {
-            const ls = CONFIG.LEAF_SIZE * 0.45; // Kleiner beim Tragen
+            const ls = CONFIG.LEAF_SIZE;
             ctx.drawImage(state.images.leaf, bodyLength / 2 - ls * 0.3, -ls / 2, ls, ls);
         }
         ctx.restore();
@@ -1147,7 +1178,7 @@
             ctx.drawImage(queenImg, -bodyLength / 2, -bodyWidth / 2, bodyLength, bodyWidth);
             // Getragenes Blatt im Untergrund
             if (u.carrying && state.images.leaf) {
-                const ls = CONFIG.LEAF_SIZE * 0.45;
+                const ls = CONFIG.LEAF_SIZE;
                 ctx.drawImage(state.images.leaf, bodyLength / 2 - ls * 0.3, -ls / 2, ls, ls);
             }
             ctx.restore();
