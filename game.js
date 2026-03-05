@@ -74,6 +74,8 @@
             carrying: false,   // Traegt gerade ein Blatt
             goingToLeaf: false, // Laeuft zu einem Blatt um es aufzuheben
             goingToDrop: false, // Laeuft zu einer Stelle um Blatt abzulegen
+            goingToDroppedLeaf: false, // Laeuft zu abgelegtem Blatt um es aufzuheben
+            _pickDroppedIdx: -1, // Index des aufzuhebenden abgelegten Blatts
         },
         holes: [], // Array von {x, y} - gegrabene Loecher
         food: null, // Aktueller Blatterhaufen: {x, y, leaves: [{ox, oy, angle}], count: n}
@@ -94,6 +96,7 @@
             lastTapY: 0,
             carrying: false,           // Traegt ein Blatt im Untergrund
             goingToDrop: false,        // Laeuft zu Ablage-Stelle im Untergrund
+            _pickDroppedIdx: -1,       // Index des aufzuhebenden abgelegten Blatts
             droppedLeaves: [],         // Abgelegte Blaetter im Untergrund: [{x, y, angle}]
         }, // Untergrund-Ansicht
         doubleTap: {
@@ -405,6 +408,41 @@
                     }
                     return;
                 }
+                // Doppelklick auf abgelegtes Blatt im Untergrund -> aufheben
+                if (!u.carrying && u.droppedLeaves.length > 0) {
+                    let bestIdx = -1;
+                    let bestDist = Infinity;
+                    for (let i = 0; i < u.droppedLeaves.length; i++) {
+                        const dl = u.droppedLeaves[i];
+                        const ddx = worldX - dl.x;
+                        const ddy = worldY - dl.y;
+                        const dd = Math.sqrt(ddx * ddx + ddy * ddy);
+                        if (dd < bestDist) {
+                            bestDist = dd;
+                            bestIdx = i;
+                        }
+                    }
+                    if (bestIdx >= 0 && bestDist < CONFIG.LEAF_SIZE * 1.2) {
+                        if (u.currentDig) {
+                            u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                            u.currentDig = null;
+                        }
+                        const dl = u.droppedLeaves[bestIdx];
+                        const cp = closestPointOnTunnels(dl.x, dl.y, u.tunnels);
+                        const sp = closestPointOnTunnels(u.queenX, u.queenY, u.tunnels);
+                        const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : u.queenX;
+                        const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : u.queenY;
+                        const pickPath = findTunnelPath(startX, startY, cp.x, cp.y, u.tunnels);
+                        if (pickPath) {
+                            u.path = pickPath;
+                            u.moving = true;
+                            u.goingToExit = false;
+                            u.goingToDrop = false;
+                            u._pickDroppedIdx = bestIdx;
+                        }
+                        return;
+                    }
+                }
                 // Doppelklick: laufendes Graben abschliessen, neues Graben in gerader Linie starten
                 if (u.currentDig) {
                     u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
@@ -485,6 +523,35 @@
                 state.queen.goingToLeaf = false;
                 state.queen.goingToDrop = true;
                 return;
+            }
+            // Doppelklick auf abgelegtes Blatt -> wieder aufheben
+            if (state.droppedLeaves.length > 0) {
+                let bestIdx = -1;
+                let bestDist = Infinity;
+                for (let i = 0; i < state.droppedLeaves.length; i++) {
+                    const dl = state.droppedLeaves[i];
+                    const ddx = worldX - dl.x;
+                    const ddy = worldY - dl.y;
+                    const dd = Math.sqrt(ddx * ddx + ddy * ddy);
+                    if (dd < bestDist) {
+                        bestDist = dd;
+                        bestIdx = i;
+                    }
+                }
+                if (bestIdx >= 0 && bestDist < CONFIG.LEAF_SIZE * 1.2) {
+                    const dl = state.droppedLeaves[bestIdx];
+                    state.queen.targetX = dl.x;
+                    state.queen.targetY = dl.y;
+                    state.queen.moving = true;
+                    state.queen.digging = false;
+                    state.queen.digX = null;
+                    state.queen.digY = null;
+                    state.queen.goingToHole = false;
+                    state.queen.goingToLeaf = false;
+                    state.queen.goingToDroppedLeaf = true;
+                    state.queen._pickDroppedIdx = bestIdx;
+                    return;
+                }
             }
             // Doppelklick auf Blaetterhaufen -> Blatt aufheben
             if (state.food && state.food.leaves.length > 0) {
@@ -782,6 +849,16 @@
                     }
                 }
             }
+            // Wenn Ameise an abgelegtem Blatt angekommen -> aufheben
+            if (q.goingToDroppedLeaf) {
+                q.goingToDroppedLeaf = false;
+                const idx = q._pickDroppedIdx;
+                if (idx >= 0 && idx < state.droppedLeaves.length) {
+                    state.droppedLeaves.splice(idx, 1);
+                    q.carrying = true;
+                }
+                q._pickDroppedIdx = -1;
+            }
             // Wenn Ameise an Ablage-Stelle angekommen -> Blatt ablegen
             if (q.goingToDrop) {
                 q.goingToDrop = false;
@@ -836,6 +913,12 @@
                         u.droppedLeaves.push({ x: u.queenX, y: u.queenY, angle: Math.random() * Math.PI * 2 });
                         u.carrying = false;
                     }
+                }
+                // Abgelegtes Blatt im Untergrund aufheben
+                if (u._pickDroppedIdx >= 0 && u._pickDroppedIdx < u.droppedLeaves.length) {
+                    u.droppedLeaves.splice(u._pickDroppedIdx, 1);
+                    u.carrying = true;
+                    u._pickDroppedIdx = -1;
                 }
                 if (u.goingToExit) {
                     u.goingToExit = false;
@@ -968,7 +1051,7 @@
         // Getragenes Blatt vor dem Kopf zeichnen
         if (q.carrying && state.images.leaf) {
             const ls = CONFIG.LEAF_SIZE;
-            ctx.drawImage(state.images.leaf, bodyLength / 2 - ls * 0.3, -ls / 2, ls, ls);
+            ctx.drawImage(state.images.leaf, bodyLength / 2 - ls * 0.65, -ls / 2, ls, ls);
         }
         ctx.restore();
     }
@@ -1179,7 +1262,7 @@
             // Getragenes Blatt im Untergrund
             if (u.carrying && state.images.leaf) {
                 const ls = CONFIG.LEAF_SIZE;
-                ctx.drawImage(state.images.leaf, bodyLength / 2 - ls * 0.3, -ls / 2, ls, ls);
+                ctx.drawImage(state.images.leaf, bodyLength / 2 - ls * 0.65, -ls / 2, ls, ls);
             }
             ctx.restore();
         }
