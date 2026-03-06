@@ -135,6 +135,10 @@
             pupae: [],             // Puppen im Untergrund: [{x, y}]
             workers: [],           // Fertige Arbeiter-Ameisen (Untergrund + Oberflaeche)
             // workers: [{x, y, angle, state, targetX, targetY, carrying, underground, path, ...}]
+            firstWorkerPhase: null,    // null | 'egg' | 'pupa' | 'worker' | 'done'
+            firstWorkerTimer: 0,
+            firstWorkerX: 0,
+            firstWorkerY: 0,
         },
         // Long-Press Erkennung
         longPress: {
@@ -145,6 +149,39 @@
         popup: {
             visible: false,
             x: 0, y: 0,           // Screen-Position des Popups
+        },
+        // Spieler-gesteuerte Arbeiterameise (nach Brut-Sequenz)
+        playerWorker: {
+            active: false,
+            // Oberfläche
+            x: 0, y: 0,
+            targetX: null, targetY: null,
+            angle: 0,
+            moving: false,
+            digging: false,
+            digTimer: 0,
+            digX: null, digY: null,
+            goingToHole: false,
+            carrying: false,
+            goingToLeaf: false,
+            goingToDrop: false,
+            goingToDroppedLeaf: false,
+            _pickDroppedIdx: -1,
+            _pickLeafIdx: -1,
+            // Untergrund
+            undergroundActive: false,
+            ugX: 0, ugY: 0,
+            ugAngle: Math.PI / 2,
+            ugPath: [],
+            ugMoving: false,
+            ugGoingToExit: false,
+            ugCarrying: false,
+            ugGoingToDrop: false,
+            ug_pickDroppedIdx: -1,
+            ugCurrentDig: null,
+            ugLastTapTime: 0,
+            ugLastTapX: 0,
+            ugLastTapY: 0,
         },
     };
 
@@ -224,10 +261,15 @@
         const viewW = canvas.width / CONFIG.ZOOM;
         const viewH = canvas.height / CONFIG.ZOOM;
 
-        // Kamera zentriert auf Koenigin, wenn kein Drag aktiv
+        // Kamera zentriert auf aktives Entity, wenn kein Drag aktiv
         if (!state.touch.isDragging) {
-            state.camera.x = state.queen.x - viewW / 2;
-            state.camera.y = state.queen.y - viewH / 2;
+            if (state.playerWorker.active) {
+                state.camera.x = state.playerWorker.x - viewW / 2;
+                state.camera.y = state.playerWorker.y - viewH / 2;
+            } else {
+                state.camera.x = state.queen.x - viewW / 2;
+                state.camera.y = state.queen.y - viewH / 2;
+            }
         }
 
         // Kamera-Grenzen
@@ -383,72 +425,113 @@
         return path.length > 0 ? path : [{x: toX, y: toY}];
     }
 
+    // --- Hilfsfunktion: Ist die Untergrund-Ansicht aktiv? ---
+    function isUndergroundView() {
+        if (state.playerWorker.active) return state.playerWorker.undergroundActive;
+        return state.underground.active;
+    }
+
     // --- Tap-Verarbeitung (Einzelklick vs. Doppelklick) ---
     function handleTap(worldX, worldY) {
-        // Untergrund-Ansicht: Ameise steuern, Gaenge graben, Ausgang benutzen
-        if (state.underground.active) {
-            const u = state.underground;
+        const pw = state.playerWorker;
+        const isPW = pw.active;
 
-            // Ausgang antippen -> laufendes Graben abschliessen + Wegfindung zum Ausgang
+        // Untergrund-Ansicht: Ameise steuern, Gaenge graben, Ausgang benutzen
+        if (isUndergroundView()) {
+            const u = state.underground;
+            // Position und Bewegungs-State je nach aktivem Entity
+            const qx = isPW ? pw.ugX : u.queenX;
+            const qy = isPW ? pw.ugY : u.queenY;
+            const curDig = isPW ? pw.ugCurrentDig : u.currentDig;
+            const isCarrying = isPW ? pw.ugCarrying : u.carrying;
+            const lastTapTime = isPW ? pw.ugLastTapTime : u.lastTapTime;
+            const lastTapX = isPW ? pw.ugLastTapX : u.lastTapX;
+            const lastTapY = isPW ? pw.ugLastTapY : u.lastTapY;
+
+            // Hilfsfunktion: laufendes Graben abschliessen
+            function finishCurrentDig() {
+                if (isPW) {
+                    if (pw.ugCurrentDig) {
+                        u.tunnels.push({x1: pw.ugCurrentDig.x1, y1: pw.ugCurrentDig.y1, x2: pw.ugX, y2: pw.ugY});
+                        pw.ugCurrentDig = null;
+                    }
+                } else {
+                    if (u.currentDig) {
+                        u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                        u.currentDig = null;
+                    }
+                }
+            }
+
+            // Hilfsfunktion: Pfad und Bewegung setzen
+            function setUgPath(path, goingToExit, goingToDrop, pickIdx) {
+                if (isPW) {
+                    pw.ugPath = path;
+                    pw.ugMoving = true;
+                    pw.ugGoingToExit = !!goingToExit;
+                    pw.ugGoingToDrop = !!goingToDrop;
+                    if (pickIdx !== undefined) pw.ug_pickDroppedIdx = pickIdx;
+                } else {
+                    u.path = path;
+                    u.moving = true;
+                    u.goingToExit = !!goingToExit;
+                    u.goingToDrop = !!goingToDrop;
+                    if (pickIdx !== undefined) u._pickDroppedIdx = pickIdx;
+                }
+            }
+
+            function setLastTap(time, x, y) {
+                if (isPW) { pw.ugLastTapTime = time; pw.ugLastTapX = x; pw.ugLastTapY = y; }
+                else { u.lastTapTime = time; u.lastTapX = x; u.lastTapY = y; }
+            }
+
+            // Ausgang antippen
             const dxExit = worldX - u.exitX;
             const dyExit = worldY - u.exitY;
             if (Math.sqrt(dxExit * dxExit + dyExit * dyExit) < 90) {
-                if (u.currentDig) {
-                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
-                    u.currentDig = null;
-                }
+                finishCurrentDig();
                 const exitTarget = {x: u.exitX, y: u.exitY + 15};
-                const sp = closestPointOnTunnels(u.queenX, u.queenY, u.tunnels);
-                const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : u.queenX;
-                const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : u.queenY;
+                const sp = closestPointOnTunnels(qx, qy, u.tunnels);
+                const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : qx;
+                const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : qy;
                 const exitPath = findTunnelPath(startX, startY, exitTarget.x, exitTarget.y, u.tunnels);
-                u.path = exitPath || [exitTarget];
-                u.moving = true;
-                u.goingToExit = true;
-                u.lastTapTime = 0;
+                setUgPath(exitPath || [exitTarget], true, false);
+                setLastTap(0, 0, 0);
                 return;
             }
 
             // Doppelklick-Erkennung
             const now = Date.now();
-            const dt = now - u.lastTapTime;
-            const tapDx = worldX - u.lastTapX;
-            const tapDy = worldY - u.lastTapY;
+            const dt = now - lastTapTime;
+            const tapDx = worldX - lastTapX;
+            const tapDy = worldY - lastTapY;
             const tapDist = Math.sqrt(tapDx * tapDx + tapDy * tapDy);
 
             if (dt < CONFIG.DOUBLE_TAP_DELAY && tapDist < CONFIG.DOUBLE_TAP_RADIUS) {
-                u.lastTapTime = 0;
-                // Wenn Ameise im Untergrund traegt: Doppelklick = Blatt in Tunnel ablegen
-                if (u.carrying) {
-                    if (u.currentDig) {
-                        u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
-                        u.currentDig = null;
-                    }
+                setLastTap(0, 0, 0);
+                // Blatt ablegen
+                if (isCarrying) {
+                    finishCurrentDig();
                     const cp = closestPointOnTunnels(worldX, worldY, u.tunnels);
                     if (cp.dist < Infinity) {
-                        const sp = closestPointOnTunnels(u.queenX, u.queenY, u.tunnels);
-                        const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : u.queenX;
-                        const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : u.queenY;
+                        const sp = closestPointOnTunnels(qx, qy, u.tunnels);
+                        const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : qx;
+                        const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : qy;
                         const dropPath = findTunnelPath(startX, startY, cp.x, cp.y, u.tunnels);
                         if (dropPath) {
-                            u.path = dropPath;
-                            u.moving = true;
-                            u.goingToExit = false;
-                            u.goingToDrop = true;
+                            setUgPath(dropPath, false, true);
                         } else {
-                            // Kein Pfad gefunden -> direkt ablegen
-                            u.droppedLeaves.push({ x: u.queenX, y: u.queenY, angle: Math.random() * Math.PI * 2 });
-                            u.carrying = false;
+                            u.droppedLeaves.push({ x: qx, y: qy, angle: Math.random() * Math.PI * 2 });
+                            if (isPW) pw.ugCarrying = false; else u.carrying = false;
                         }
                     } else {
-                        // Keine Tunnel vorhanden -> direkt ablegen
-                        u.droppedLeaves.push({ x: u.queenX, y: u.queenY, angle: Math.random() * Math.PI * 2 });
-                        u.carrying = false;
+                        u.droppedLeaves.push({ x: qx, y: qy, angle: Math.random() * Math.PI * 2 });
+                        if (isPW) pw.ugCarrying = false; else u.carrying = false;
                     }
                     return;
                 }
-                // Doppelklick auf abgelegtes Blatt im Untergrund -> aufheben
-                if (!u.carrying && u.droppedLeaves.length > 0) {
+                // Abgelegtes Blatt aufheben
+                if (!isCarrying && u.droppedLeaves.length > 0) {
                     let bestIdx = -1;
                     let bestDist = Infinity;
                     for (let i = 0; i < u.droppedLeaves.length; i++) {
@@ -456,71 +539,61 @@
                         const ddx = worldX - dl.x;
                         const ddy = worldY - dl.y;
                         const dd = Math.sqrt(ddx * ddx + ddy * ddy);
-                        if (dd < bestDist) {
-                            bestDist = dd;
-                            bestIdx = i;
-                        }
+                        if (dd < bestDist) { bestDist = dd; bestIdx = i; }
                     }
                     if (bestIdx >= 0 && bestDist < CONFIG.LEAF_SIZE * 1.2) {
-                        if (u.currentDig) {
-                            u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
-                            u.currentDig = null;
-                        }
+                        finishCurrentDig();
                         const dl = u.droppedLeaves[bestIdx];
                         const cp = closestPointOnTunnels(dl.x, dl.y, u.tunnels);
-                        const sp = closestPointOnTunnels(u.queenX, u.queenY, u.tunnels);
-                        const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : u.queenX;
-                        const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : u.queenY;
+                        const sp = closestPointOnTunnels(qx, qy, u.tunnels);
+                        const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : qx;
+                        const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : qy;
                         const pickPath = findTunnelPath(startX, startY, cp.x, cp.y, u.tunnels);
                         if (pickPath) {
-                            u.path = pickPath;
-                            u.moving = true;
-                            u.goingToExit = false;
-                            u.goingToDrop = false;
-                            u._pickDroppedIdx = bestIdx;
+                            setUgPath(pickPath, false, false, bestIdx);
                         }
                         return;
                     }
                 }
-                // Doppelklick: laufendes Graben abschliessen, neues Graben in gerader Linie starten
-                if (u.currentDig) {
-                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
-                }
+                // Graben starten
+                finishCurrentDig();
                 const tx = Math.max(0, Math.min(worldX, CONFIG.UNDERGROUND_WIDTH));
                 const ty = Math.max(u.exitY, Math.min(worldY, CONFIG.UNDERGROUND_HEIGHT));
-                u.currentDig = {x1: u.queenX, y1: u.queenY};
-                u.path = [{x: tx, y: ty}]; // Graben: immer gerade Linie zum Ziel
-                u.moving = true;
-                u.goingToExit = false;
-            } else {
-                // Einfacher Tap: Wegfindung durch bestehende Gaenge
-                u.lastTapTime = now;
-                u.lastTapX = worldX;
-                u.lastTapY = worldY;
-                if (u.currentDig) {
-                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
-                    u.currentDig = null;
+                if (isPW) {
+                    pw.ugCurrentDig = {x1: pw.ugX, y1: pw.ugY};
+                    pw.ugPath = [{x: tx, y: ty}];
+                    pw.ugMoving = true;
+                    pw.ugGoingToExit = false;
+                } else {
+                    u.currentDig = {x1: u.queenX, y1: u.queenY};
+                    u.path = [{x: tx, y: ty}];
+                    u.moving = true;
+                    u.goingToExit = false;
                 }
+            } else {
+                // Einfacher Tap: Wegfindung
+                setLastTap(now, worldX, worldY);
+                finishCurrentDig();
                 const cp = closestPointOnTunnels(worldX, worldY, u.tunnels);
                 if (cp.dist <= CONFIG.TUNNEL_RADIUS * 2.5) {
-                    // Startposition auf naechsten Tunnel snappen
-                    const sp = closestPointOnTunnels(u.queenX, u.queenY, u.tunnels);
-                    const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : u.queenX;
-                    const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : u.queenY;
+                    const sp = closestPointOnTunnels(qx, qy, u.tunnels);
+                    const startX = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.x : qx;
+                    const startY = sp.dist <= CONFIG.TUNNEL_RADIUS ? sp.y : qy;
                     const newPath = findTunnelPath(startX, startY, cp.x, cp.y, u.tunnels);
                     if (newPath) {
-                        u.path = newPath;
-                        u.moving = true;
-                        u.goingToExit = false;
+                        setUgPath(newPath, false, false);
                     } else {
-                        u.path = [];
-                        u.moving = false;
+                        if (isPW) { pw.ugPath = []; pw.ugMoving = false; }
+                        else { u.path = []; u.moving = false; }
                     }
                 }
-                // Tap ausserhalb aller Gaenge: ignorieren
             }
             return;
         }
+
+        // === Oberfläche ===
+        // Welches Entity steuern wir?
+        const q = isPW ? pw : state.queen;
 
         // Pruefen ob auf ein fertiges Loch geklickt wurde
         const holeRadius = CONFIG.HOLE_SIZE / 2;
@@ -529,15 +602,14 @@
             const dx = worldX - h.x;
             const dy = worldY - h.y;
             if (Math.sqrt(dx * dx + dy * dy) <= holeRadius) {
-                // Klick auf Loch -> Ameise zum Loch schicken
-                state.queen.targetX = h.x;
-                state.queen.targetY = h.y;
-                state.queen.moving = true;
-                state.queen.digging = false;
-                state.queen.digX = null;
-                state.queen.digY = null;
-                state.queen.goingToHole = true;
-                state.doubleTap.lastTime = 0; // Kein Doppel-Tap-Graben auf Loecher
+                q.targetX = h.x;
+                q.targetY = h.y;
+                q.moving = true;
+                q.digging = false;
+                q.digX = null;
+                q.digY = null;
+                q.goingToHole = true;
+                state.doubleTap.lastTime = 0;
                 return;
             }
         }
@@ -549,21 +621,21 @@
         const dist = Math.sqrt(dx * dx + dy * dy);
 
         if (dt < CONFIG.DOUBLE_TAP_DELAY && dist < CONFIG.DOUBLE_TAP_RADIUS) {
-            state.doubleTap.lastTime = 0; // Reset damit kein Triple-Tap ausloest
-            // Wenn Ameise traegt: Doppelklick = hinlaufen und Blatt ablegen
-            if (state.queen.carrying) {
-                state.queen.targetX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
-                state.queen.targetY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
-                state.queen.moving = true;
-                state.queen.digging = false;
-                state.queen.digX = null;
-                state.queen.digY = null;
-                state.queen.goingToHole = false;
-                state.queen.goingToLeaf = false;
-                state.queen.goingToDrop = true;
+            state.doubleTap.lastTime = 0;
+            // Blatt ablegen
+            if (q.carrying) {
+                q.targetX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
+                q.targetY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
+                q.moving = true;
+                q.digging = false;
+                q.digX = null;
+                q.digY = null;
+                q.goingToHole = false;
+                q.goingToLeaf = false;
+                q.goingToDrop = true;
                 return;
             }
-            // Doppelklick auf abgelegtes Blatt -> wieder aufheben
+            // Abgelegtes Blatt aufheben
             if (state.droppedLeaves.length > 0) {
                 let bestIdx = -1;
                 let bestDist = Infinity;
@@ -572,29 +644,25 @@
                     const ddx = worldX - dl.x;
                     const ddy = worldY - dl.y;
                     const dd = Math.sqrt(ddx * ddx + ddy * ddy);
-                    if (dd < bestDist) {
-                        bestDist = dd;
-                        bestIdx = i;
-                    }
+                    if (dd < bestDist) { bestDist = dd; bestIdx = i; }
                 }
                 if (bestIdx >= 0 && bestDist < CONFIG.LEAF_SIZE * 1.2) {
                     const dl = state.droppedLeaves[bestIdx];
-                    state.queen.targetX = dl.x;
-                    state.queen.targetY = dl.y;
-                    state.queen.moving = true;
-                    state.queen.digging = false;
-                    state.queen.digX = null;
-                    state.queen.digY = null;
-                    state.queen.goingToHole = false;
-                    state.queen.goingToLeaf = false;
-                    state.queen.goingToDroppedLeaf = true;
-                    state.queen._pickDroppedIdx = bestIdx;
+                    q.targetX = dl.x;
+                    q.targetY = dl.y;
+                    q.moving = true;
+                    q.digging = false;
+                    q.digX = null;
+                    q.digY = null;
+                    q.goingToHole = false;
+                    q.goingToLeaf = false;
+                    q.goingToDroppedLeaf = true;
+                    q._pickDroppedIdx = bestIdx;
                     return;
                 }
             }
-            // Doppelklick auf Blaetterhaufen -> Blatt aufheben
+            // Blatt aufheben
             if (state.food && state.food.leaves.length > 0) {
-                // Naechstes Blatt zum Klickpunkt finden
                 let bestIdx = -1;
                 let bestDist = Infinity;
                 for (let i = 0; i < state.food.leaves.length; i++) {
@@ -604,47 +672,42 @@
                     const ldx = worldX - lx;
                     const ldy = worldY - ly;
                     const ld = Math.sqrt(ldx * ldx + ldy * ldy);
-                    if (ld < bestDist) {
-                        bestDist = ld;
-                        bestIdx = i;
-                    }
+                    if (ld < bestDist) { bestDist = ld; bestIdx = i; }
                 }
                 if (bestIdx >= 0 && bestDist < CONFIG.LEAF_SIZE * 1.5) {
                     const chosenLeaf = state.food.leaves[bestIdx];
-                    const leafWorldX = state.food.x + chosenLeaf.ox;
-                    const leafWorldY = state.food.y + chosenLeaf.oy;
-                    state.queen.targetX = leafWorldX;
-                    state.queen.targetY = leafWorldY;
-                    state.queen.moving = true;
-                    state.queen.digging = false;
-                    state.queen.digX = null;
-                    state.queen.digY = null;
-                    state.queen.goingToHole = false;
-                    state.queen.goingToLeaf = true;
-                    state.queen._pickLeafIdx = bestIdx; // Merke welches Blatt aufgehoben wird
+                    q.targetX = state.food.x + chosenLeaf.ox;
+                    q.targetY = state.food.y + chosenLeaf.oy;
+                    q.moving = true;
+                    q.digging = false;
+                    q.digX = null;
+                    q.digY = null;
+                    q.goingToHole = false;
+                    q.goingToLeaf = true;
+                    q._pickLeafIdx = bestIdx;
                     return;
                 }
             }
-            // Sonst: Graben starten
+            // Graben starten
             startDigging(worldX, worldY);
         } else {
-            // Einfacher Tap -> Ameise bewegen
+            // Einfacher Tap -> bewegen
             state.doubleTap.lastTime = now;
             state.doubleTap.lastX = worldX;
             state.doubleTap.lastY = worldY;
 
-            state.queen.targetX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
-            state.queen.targetY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
-            state.queen.moving = true;
-            state.queen.digging = false;
-            state.queen.digX = null;
-            state.queen.digY = null;
-            state.queen.goingToHole = false;
+            q.targetX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
+            q.targetY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
+            q.moving = true;
+            q.digging = false;
+            q.digX = null;
+            q.digY = null;
+            q.goingToHole = false;
         }
     }
 
     function startDigging(worldX, worldY) {
-        const q = state.queen;
+        const q = state.playerWorker.active ? state.playerWorker : state.queen;
         const clampedX = Math.max(0, Math.min(worldX, CONFIG.WORLD_WIDTH));
         const clampedY = Math.max(0, Math.min(worldY, CONFIG.WORLD_HEIGHT));
 
@@ -713,8 +776,17 @@
             // Brut starten!
             state.brood.started = true;
             state.brood.wingless = true;
-            state.brood.eggTimer = CONFIG.EGG_INTERVAL;
             state.popup.visible = false;
+            // Schnelle Erst-Arbeiter-Sequenz starten (3 Sekunden: Ei -> Puppe -> Arbeiter)
+            const u = state.underground;
+            state.brood.firstWorkerPhase = 'egg';
+            state.brood.firstWorkerTimer = 60; // 1 Sekunde bei 60fps
+            state.brood.firstWorkerX = u.queenX + (Math.random() - 0.5) * 40;
+            state.brood.firstWorkerY = u.queenY + (Math.random() - 0.5) * 40;
+            state.brood.eggs.push({ x: state.brood.firstWorkerX, y: state.brood.firstWorkerY });
+            // Koenigin stoppt
+            u.moving = false;
+            u.path = [];
             return true;
         }
         // Klick ausserhalb -> Popup schliessen
@@ -743,8 +815,8 @@
         state.touch.currentY = scaled.y;
         state.touch.isDragging = false;
         // Je nach Ansicht den richtigen Kamera-Startpunkt merken
-        state.touch.cameraStartX = state.underground.active ? state.underground.camX : state.camera.x;
-        state.touch.cameraStartY = state.underground.active ? state.underground.camY : state.camera.y;
+        state.touch.cameraStartX = isUndergroundView() ? state.underground.camX : state.camera.x;
+        state.touch.cameraStartY = isUndergroundView() ? state.underground.camY : state.camera.y;
         // Long-Press starten
         startLongPressCheck(scaled.x, scaled.y);
     }, { passive: false });
@@ -769,7 +841,7 @@
         if (dist > CONFIG.TAP_THRESHOLD) {
             state.touch.isDragging = true;
             cancelLongPress();
-            if (state.underground.active) {
+            if (isUndergroundView()) {
                 state.underground.camX = state.touch.cameraStartX - dx / CONFIG.ZOOM;
                 state.underground.camY = state.touch.cameraStartY - dy / CONFIG.ZOOM;
             } else {
@@ -792,7 +864,7 @@
         // Wenn es kein Drag war -> Tap verarbeiten (Einzel- oder Doppeltap)
         if (!state.touch.isDragging) {
             let worldX, worldY;
-            if (state.underground.active) {
+            if (isUndergroundView()) {
                 worldX = scaled.x / CONFIG.ZOOM + state.underground.camX;
                 worldY = scaled.y / CONFIG.ZOOM + state.underground.camY;
             } else {
@@ -833,8 +905,8 @@
         mouseStartX = mx;
         mouseStartY = my;
         mouseDragging = false;
-        mouseCamStartX = state.underground.active ? state.underground.camX : state.camera.x;
-        mouseCamStartY = state.underground.active ? state.underground.camY : state.camera.y;
+        mouseCamStartX = isUndergroundView() ? state.underground.camX : state.camera.x;
+        mouseCamStartY = isUndergroundView() ? state.underground.camY : state.camera.y;
         // Long-Press starten
         startLongPressCheck(mx, my);
     });
@@ -850,7 +922,7 @@
         if (dist > CONFIG.TAP_THRESHOLD) {
             mouseDragging = true;
             cancelLongPress();
-            if (state.underground.active) {
+            if (isUndergroundView()) {
                 state.underground.camX = mouseCamStartX - dx / CONFIG.ZOOM;
                 state.underground.camY = mouseCamStartY - dy / CONFIG.ZOOM;
             } else {
@@ -866,7 +938,7 @@
             const mx = e.clientX * window.devicePixelRatio;
             const my = e.clientY * window.devicePixelRatio;
             let worldX, worldY;
-            if (state.underground.active) {
+            if (isUndergroundView()) {
                 worldX = mx / CONFIG.ZOOM + state.underground.camX;
                 worldY = my / CONFIG.ZOOM + state.underground.camY;
             } else {
@@ -1058,6 +1130,176 @@
         u.queenY = Math.max(u.exitY, Math.min(u.queenY, CONFIG.UNDERGROUND_HEIGHT - CONFIG.QUEEN_SIZE / 2));
     }
 
+    // --- Spieler-Arbeiter: Oberfläche ---
+    function updatePlayerWorker() {
+        const pw = state.playerWorker;
+        if (!pw.active || pw.undergroundActive) return;
+
+        // Grab-Timer
+        if (pw.digging && pw.digTimer > 0 && !pw.moving) {
+            pw.digTimer--;
+            if (pw.digTimer <= 0) {
+                state.holes.push({ x: pw.digX, y: pw.digY });
+                pw.digging = false;
+                pw.digX = null;
+                pw.digY = null;
+            }
+            return;
+        }
+
+        if (!pw.moving || pw.targetX === null || pw.targetY === null) return;
+
+        const dx = pw.targetX - pw.x;
+        const dy = pw.targetY - pw.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < CONFIG.MOVE_DEAD_ZONE) {
+            pw.moving = false;
+            pw.targetX = null;
+            pw.targetY = null;
+            if (pw.digging) { pw.digTimer = CONFIG.DIG_DURATION; }
+            // Am Loch angekommen -> Untergrund
+            if (pw.goingToHole) {
+                pw.goingToHole = false;
+                const u = state.underground;
+                const exitX = pw.x * (CONFIG.UNDERGROUND_WIDTH / CONFIG.WORLD_WIDTH);
+                u.exitX = Math.max(CONFIG.WORKER_SIZE, Math.min(exitX, CONFIG.UNDERGROUND_WIDTH - CONFIG.WORKER_SIZE));
+                u.exitY = 100;
+                pw.ugX = u.exitX;
+                pw.ugY = u.exitY + 62;
+                pw.ugAngle = Math.PI / 2;
+                pw.ugPath = [];
+                pw.ugMoving = false;
+                pw.ugGoingToExit = false;
+                // Eingangs-Gang aktualisieren
+                if (u.tunnels.length === 0) {
+                    u.tunnels = [{x1: u.exitX, y1: u.exitY, x2: u.exitX, y2: pw.ugY}];
+                } else {
+                    u.tunnels[0] = {x1: u.exitX, y1: u.exitY, x2: u.exitX, y2: pw.ugY};
+                }
+                pw.ugCurrentDig = null;
+                pw.ugLastTapTime = 0;
+                // Kamera setzen
+                const viewW = canvas.width / CONFIG.ZOOM;
+                u.camX = Math.max(0, Math.min(u.exitX - viewW / 2, CONFIG.UNDERGROUND_WIDTH - viewW));
+                u.camY = 0;
+                // Trage-Zustand uebernehmen
+                pw.ugCarrying = pw.carrying;
+                pw.carrying = false;
+                pw.undergroundActive = true;
+            }
+            // Blatt aufheben
+            if (pw.goingToLeaf) {
+                pw.goingToLeaf = false;
+                if (state.food && state.food.leaves.length > 0) {
+                    const idx = pw._pickLeafIdx;
+                    if (idx >= 0 && idx < state.food.leaves.length) {
+                        state.food.leaves.splice(idx, 1);
+                    } else {
+                        state.food.leaves.pop();
+                    }
+                    pw._pickLeafIdx = -1;
+                    pw.carrying = true;
+                    if (state.food.leaves.length === 0) spawnFoodPile();
+                }
+            }
+            // Abgelegtes Blatt aufheben
+            if (pw.goingToDroppedLeaf) {
+                pw.goingToDroppedLeaf = false;
+                const idx = pw._pickDroppedIdx;
+                if (idx >= 0 && idx < state.droppedLeaves.length) {
+                    state.droppedLeaves.splice(idx, 1);
+                    pw.carrying = true;
+                }
+                pw._pickDroppedIdx = -1;
+            }
+            // Blatt ablegen
+            if (pw.goingToDrop) {
+                pw.goingToDrop = false;
+                if (pw.carrying) {
+                    state.droppedLeaves.push({ x: pw.x, y: pw.y, angle: Math.random() * Math.PI * 2 });
+                    pw.carrying = false;
+                }
+            }
+            return;
+        }
+
+        pw.angle = Math.atan2(dy, dx);
+        pw.x += (dx / dist) * CONFIG.WORKER_SPEED;
+        pw.y += (dy / dist) * CONFIG.WORKER_SPEED;
+        pw.x = Math.max(CONFIG.WORKER_SIZE / 2, Math.min(pw.x, CONFIG.WORLD_WIDTH - CONFIG.WORKER_SIZE / 2));
+        pw.y = Math.max(CONFIG.WORKER_SIZE / 2, Math.min(pw.y, CONFIG.WORLD_HEIGHT - CONFIG.WORKER_SIZE / 2));
+    }
+
+    // --- Spieler-Arbeiter: Untergrund ---
+    function updatePlayerWorkerUnderground() {
+        const pw = state.playerWorker;
+        const u = state.underground;
+        if (!pw.active || !pw.undergroundActive) return;
+        if (!pw.ugMoving || pw.ugPath.length === 0) return;
+
+        const wp = pw.ugPath[0];
+        const dx = wp.x - pw.ugX;
+        const dy = wp.y - pw.ugY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < CONFIG.MOVE_DEAD_ZONE) {
+            pw.ugX = wp.x;
+            pw.ugY = wp.y;
+            pw.ugPath.shift();
+
+            if (pw.ugPath.length === 0) {
+                // Graben abschliessen
+                if (pw.ugCurrentDig) {
+                    u.tunnels.push({x1: pw.ugCurrentDig.x1, y1: pw.ugCurrentDig.y1, x2: pw.ugX, y2: pw.ugY});
+                    pw.ugCurrentDig = null;
+                }
+                pw.ugMoving = false;
+                // Blatt ablegen
+                if (pw.ugGoingToDrop) {
+                    pw.ugGoingToDrop = false;
+                    if (pw.ugCarrying) {
+                        u.droppedLeaves.push({ x: pw.ugX, y: pw.ugY, angle: Math.random() * Math.PI * 2 });
+                        pw.ugCarrying = false;
+                    }
+                }
+                // Abgelegtes Blatt aufheben
+                if (pw.ug_pickDroppedIdx >= 0 && pw.ug_pickDroppedIdx < u.droppedLeaves.length) {
+                    u.droppedLeaves.splice(pw.ug_pickDroppedIdx, 1);
+                    pw.ugCarrying = true;
+                    pw.ug_pickDroppedIdx = -1;
+                }
+                // Ausgang erreicht
+                if (pw.ugGoingToExit) {
+                    pw.ugGoingToExit = false;
+                    pw.carrying = pw.ugCarrying;
+                    pw.ugCarrying = false;
+                    pw.undergroundActive = false;
+                    // Position auf Oberfläche: beim Loch
+                    // Finde das nächste Loch
+                    if (state.holes.length > 0) {
+                        let bestHole = state.holes[0];
+                        let bestDist = Infinity;
+                        for (const h of state.holes) {
+                            const hx = h.x * (CONFIG.UNDERGROUND_WIDTH / CONFIG.WORLD_WIDTH);
+                            const hdist = Math.abs(hx - u.exitX);
+                            if (hdist < bestDist) { bestDist = hdist; bestHole = h; }
+                        }
+                        pw.x = bestHole.x;
+                        pw.y = bestHole.y;
+                    }
+                }
+            }
+            return;
+        }
+
+        pw.ugAngle = Math.atan2(dy, dx);
+        pw.ugX += (dx / dist) * CONFIG.WORKER_SPEED;
+        pw.ugY += (dy / dist) * CONFIG.WORKER_SPEED;
+        pw.ugX = Math.max(CONFIG.WORKER_SIZE / 2, Math.min(pw.ugX, CONFIG.UNDERGROUND_WIDTH - CONFIG.WORKER_SIZE / 2));
+        pw.ugY = Math.max(u.exitY, Math.min(pw.ugY, CONFIG.UNDERGROUND_HEIGHT - CONFIG.WORKER_SIZE / 2));
+    }
+
     // --- Rendering ---
     function drawGrass() {
         const img = state.images.grass;
@@ -1129,27 +1371,26 @@
     }
 
     function drawDigIndicator() {
-        const q = state.queen;
+        const q = state.playerWorker.active ? state.playerWorker : state.queen;
         if (!q.digging || q.digTimer <= 0 || q.moving) return;
 
-        // Fortschrittsanzeige ueber der Ameise
         const screenX = q.x - state.camera.x;
         const screenY = q.y - state.camera.y;
         const progress = 1 - (q.digTimer / CONFIG.DIG_DURATION);
         const barWidth = 40;
         const barHeight = 5;
+        const size = state.playerWorker.active ? CONFIG.WORKER_SIZE : CONFIG.QUEEN_SIZE;
 
         ctx.save();
-        // Hintergrund
         ctx.fillStyle = '#333';
-        ctx.fillRect(screenX - barWidth / 2, screenY - CONFIG.QUEEN_SIZE / 2 - 12, barWidth, barHeight);
-        // Fortschritt
+        ctx.fillRect(screenX - barWidth / 2, screenY - size / 2 - 12, barWidth, barHeight);
         ctx.fillStyle = '#8B4513';
-        ctx.fillRect(screenX - barWidth / 2, screenY - CONFIG.QUEEN_SIZE / 2 - 12, barWidth * progress, barHeight);
+        ctx.fillRect(screenX - barWidth / 2, screenY - size / 2 - 12, barWidth * progress, barHeight);
         ctx.restore();
     }
 
     function drawQueen() {
+        if (state.playerWorker.active) return; // Koenigin ist im Untergrund, Spieler steuert Arbeiter
         const img = (state.brood.wingless && state.images.queen_wingless) ? state.images.queen_wingless : state.images.queen;
         if (!img) return;
 
@@ -1174,8 +1415,30 @@
         ctx.restore();
     }
 
+    function drawPlayerWorker() {
+        const pw = state.playerWorker;
+        if (!pw.active || pw.undergroundActive) return;
+        const img = state.images.queen_wingless || state.images.queen;
+        if (!img) return;
+
+        const bodyLength = CONFIG.WORKER_SIZE * 1.5;
+        const bodyWidth = CONFIG.WORKER_SIZE;
+        const screenX = pw.x - state.camera.x;
+        const screenY = pw.y - state.camera.y;
+
+        ctx.save();
+        ctx.translate(screenX, screenY);
+        ctx.rotate(pw.angle);
+        ctx.drawImage(img, -bodyLength / 2, -bodyWidth / 2, bodyLength, bodyWidth);
+        if (pw.carrying && state.images.leaf) {
+            const ls = CONFIG.LEAF_SIZE * 0.7;
+            ctx.drawImage(state.images.leaf, bodyLength / 2 - ls * 0.65, -ls / 2, ls, ls);
+        }
+        ctx.restore();
+    }
+
     function drawTargetMarker() {
-        const q = state.queen;
+        const q = state.playerWorker.active ? state.playerWorker : state.queen;
         if (!q.moving || q.targetX === null) return;
 
         const screenX = q.targetX - state.camera.x;
@@ -1197,10 +1460,15 @@
         const u = state.underground;
         const viewW = canvas.width / CONFIG.ZOOM;
         const viewH = canvas.height / CONFIG.ZOOM;
-        // Kamera folgt der Ameise, wenn kein Drag aktiv
+        // Kamera folgt dem aktiven Entity, wenn kein Drag aktiv
         if (!state.touch.isDragging && !mouseDragging) {
-            u.camX = u.queenX - viewW / 2;
-            u.camY = u.queenY - viewH / 2;
+            if (state.playerWorker.active) {
+                u.camX = state.playerWorker.ugX - viewW / 2;
+                u.camY = state.playerWorker.ugY - viewH / 2;
+            } else {
+                u.camX = u.queenX - viewW / 2;
+                u.camY = u.queenY - viewH / 2;
+            }
         }
         u.camX = Math.max(0, Math.min(u.camX, CONFIG.UNDERGROUND_WIDTH - viewW));
         u.camY = Math.max(0, Math.min(u.camY, CONFIG.UNDERGROUND_HEIGHT - viewH));
@@ -1249,6 +1517,10 @@
         const allSegs = u.tunnels.slice();
         if (u.currentDig) {
             allSegs.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+        }
+        if (state.playerWorker.ugCurrentDig) {
+            const pw = state.playerWorker;
+            allSegs.push({x1: pw.ugCurrentDig.x1, y1: pw.ugCurrentDig.y1, x2: pw.ugX, y2: pw.ugY});
         }
         if (allSegs.length > 0) {
             const r = CONFIG.TUNNEL_RADIUS;
@@ -1339,18 +1611,25 @@
         ctx.fillText('Ausgang', exitScrX, exitScrY + tunnelH / 2 + labelSize + 4);
 
         // --- Zielmarkierung der Untergrund-Ameise ---
-        if (u.moving && u.targetX !== null && !u.goingToExit) {
-            const tScrX = u.targetX - camX;
-            const tScrY = u.targetY - camY;
-            const tPulse = Math.sin(Date.now() / 200) * 0.3 + 0.7;
-            ctx.save();
-            ctx.globalAlpha = tPulse * 0.5;
-            ctx.strokeStyle = '#ffcc00';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.arc(tScrX, tScrY, 12 + tPulse * 6, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.restore();
+        {
+            const isPW = state.playerWorker.active;
+            const ugMoving = isPW ? state.playerWorker.ugMoving : u.moving;
+            const ugPath = isPW ? state.playerWorker.ugPath : u.path;
+            const ugGoingToExit = isPW ? state.playerWorker.ugGoingToExit : u.goingToExit;
+            if (ugMoving && ugPath.length > 0 && !ugGoingToExit) {
+                const target = ugPath[ugPath.length - 1];
+                const tScrX = target.x - camX;
+                const tScrY = target.y - camY;
+                const tPulse = Math.sin(Date.now() / 200) * 0.3 + 0.7;
+                ctx.save();
+                ctx.globalAlpha = tPulse * 0.5;
+                ctx.strokeStyle = '#ffcc00';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(tScrX, tScrY, 12 + tPulse * 6, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.restore();
+            }
         }
 
         // --- Abgelegte Blaetter im Untergrund ---
@@ -1369,7 +1648,7 @@
         // --- Brut-Elemente (Eier, Puppen, Arbeiter) ---
         drawBroodUnderground();
 
-        // --- Ameise im Untergrund ---
+        // --- Koenigin im Untergrund (immer zeichnen, auch als KI) ---
         const queenImg = (state.brood.wingless && state.images.queen_wingless) ? state.images.queen_wingless : state.images.queen;
         if (queenImg) {
             const scrX = u.queenX - camX;
@@ -1380,12 +1659,32 @@
             ctx.translate(scrX, scrY);
             ctx.rotate(u.queenAngle);
             ctx.drawImage(queenImg, -bodyLength / 2, -bodyWidth / 2, bodyLength, bodyWidth);
-            // Getragenes Blatt im Untergrund
             if (u.carrying && state.images.leaf) {
                 const ls = CONFIG.LEAF_SIZE;
                 ctx.drawImage(state.images.leaf, bodyLength / 2 - ls * 0.65, -ls / 2, ls, ls);
             }
             ctx.restore();
+        }
+
+        // --- Spieler-Arbeiter im Untergrund ---
+        if (state.playerWorker.active && state.playerWorker.undergroundActive) {
+            const pwImg = state.images.queen_wingless || state.images.queen;
+            if (pwImg) {
+                const pwState = state.playerWorker;
+                const pwScrX = pwState.ugX - camX;
+                const pwScrY = pwState.ugY - camY;
+                const pwBodyLength = CONFIG.WORKER_SIZE * 1.5;
+                const pwBodyWidth = CONFIG.WORKER_SIZE;
+                ctx.save();
+                ctx.translate(pwScrX, pwScrY);
+                ctx.rotate(pwState.ugAngle);
+                ctx.drawImage(pwImg, -pwBodyLength / 2, -pwBodyWidth / 2, pwBodyLength, pwBodyWidth);
+                if (pwState.ugCarrying && state.images.leaf) {
+                    const ls = CONFIG.LEAF_SIZE * 0.7;
+                    ctx.drawImage(state.images.leaf, pwBodyLength / 2 - ls * 0.65, -ls / 2, ls, ls);
+                }
+                ctx.restore();
+            }
         }
 
         ctx.restore(); // Ende des ZOOM-Blocks
@@ -1451,16 +1750,82 @@
             ctx.fill();
         }
 
-        // Koenigin auf Minimap
+        // Spieler-Entity auf Minimap
         ctx.globalAlpha = 1;
-        const queenMapX = x + (state.queen.x / CONFIG.WORLD_WIDTH) * mapW;
-        const queenMapY = y + (state.queen.y / CONFIG.WORLD_HEIGHT) * mapH;
-        ctx.fillStyle = '#ffcc00';
-        ctx.beginPath();
-        ctx.arc(queenMapX, queenMapY, 3, 0, Math.PI * 2);
-        ctx.fill();
+        if (state.playerWorker.active) {
+            const pwMapX = x + (state.playerWorker.x / CONFIG.WORLD_WIDTH) * mapW;
+            const pwMapY = y + (state.playerWorker.y / CONFIG.WORLD_HEIGHT) * mapH;
+            ctx.fillStyle = '#ffcc00';
+            ctx.beginPath();
+            ctx.arc(pwMapX, pwMapY, 3, 0, Math.PI * 2);
+            ctx.fill();
+        } else {
+            const queenMapX = x + (state.queen.x / CONFIG.WORLD_WIDTH) * mapW;
+            const queenMapY = y + (state.queen.y / CONFIG.WORLD_HEIGHT) * mapH;
+            ctx.fillStyle = '#ffcc00';
+            ctx.beginPath();
+            ctx.arc(queenMapX, queenMapY, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
 
         ctx.restore();
+    }
+
+    // --- Schnelle Erst-Arbeiter-Sequenz (3 Sekunden: Ei -> Puppe -> Arbeiter) ---
+    function updateFirstWorkerSequence() {
+        const b = state.brood;
+        if (!b.firstWorkerPhase || b.firstWorkerPhase === 'done') return;
+
+        b.firstWorkerTimer--;
+        if (b.firstWorkerTimer > 0) return;
+
+        switch (b.firstWorkerPhase) {
+            case 'egg':
+                // Ei -> Puppe
+                b.eggs = b.eggs.filter(e => e.x !== b.firstWorkerX || e.y !== b.firstWorkerY);
+                b.pupae.push({ x: b.firstWorkerX, y: b.firstWorkerY });
+                b.firstWorkerPhase = 'pupa';
+                b.firstWorkerTimer = 60;
+                break;
+            case 'pupa':
+                // Puppe -> Arbeiter (visuell sichtbar für 1 Sekunde)
+                b.pupae = b.pupae.filter(p => p.x !== b.firstWorkerX || p.y !== b.firstWorkerY);
+                b.firstWorkerPhase = 'worker';
+                b.firstWorkerTimer = 60;
+                break;
+            case 'worker':
+                // Sequenz abgeschlossen -> Spieler-Arbeiter aktivieren
+                b.firstWorkerPhase = 'done';
+                activatePlayerWorker();
+                break;
+        }
+    }
+
+    function activatePlayerWorker() {
+        const u = state.underground;
+        const b = state.brood;
+        const pw = state.playerWorker;
+
+        pw.active = true;
+
+        // Spieler-Arbeiter startet im Untergrund bei der Position des ersten Arbeiters
+        pw.ugX = b.firstWorkerX;
+        pw.ugY = b.firstWorkerY;
+        pw.ugAngle = Math.PI / 2;
+        pw.ugPath = [];
+        pw.ugMoving = false;
+        pw.ugGoingToExit = false;
+        pw.ugCarrying = false;
+        pw.undergroundActive = true;
+
+        // Oberflächen-Position vorinitialisieren
+        pw.x = state.queen.x;
+        pw.y = state.queen.y;
+
+        // Koenigin wird KI: bleibt stehen, legt Eier im normalen Intervall
+        b.eggTimer = CONFIG.EGG_INTERVAL;
+        u.moving = false;
+        u.path = [];
     }
 
     // --- Brut-System Update ---
@@ -1469,8 +1834,8 @@
         const u = state.underground;
         const b = state.brood;
 
-        // Koenigin legt Eier (nur wenn im Untergrund aktiv)
-        if (u.active) {
+        // Koenigin legt Eier (wenn im Untergrund aktiv, oder wenn KI-Koenigin nach Spieler-Arbeiter-Aktivierung)
+        if (state.playerWorker.active || u.active) {
             b.eggTimer--;
             if (b.eggTimer <= 0 && (b.eggs.length + b.pupae.length + b.workers.length) < CONFIG.MAX_EGGS) {
                 // Ei direkt bei der Koenigin ablegen
@@ -1831,6 +2196,21 @@
             }
             ctx.restore();
         }
+
+        // Erste Arbeiter-Ameise während der "worker"-Phase zeichnen (bevor Spieler die Kontrolle hat)
+        if (b.firstWorkerPhase === 'worker') {
+            const fwImg = state.images.queen_wingless || state.images.queen;
+            if (fwImg) {
+                const fwX = b.firstWorkerX - camX;
+                const fwY = b.firstWorkerY - camY;
+                const fwL = CONFIG.WORKER_SIZE * 1.5;
+                const fwW = CONFIG.WORKER_SIZE;
+                ctx.save();
+                ctx.translate(fwX, fwY);
+                ctx.drawImage(fwImg, -fwL / 2, -fwW / 2, fwL, fwW);
+                ctx.restore();
+            }
+        }
     }
 
     // --- Arbeiter auf der Oberflaeche zeichnen ---
@@ -1872,20 +2252,28 @@
         // Rendern
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Brut-System und Arbeiter immer updaten
+        // Brut-System, Arbeiter und Erst-Arbeiter-Sequenz immer updaten
         updateBrood();
+        updateFirstWorkerSequence();
         updateWorkers();
 
-        if (state.underground.active) {
-            // Untergrund-Ansicht: Ameise bewegen, Kamera folgt
-            updateUndergroundQueen();
+        if (isUndergroundView()) {
+            // Untergrund-Ansicht
+            if (state.playerWorker.active) {
+                updatePlayerWorkerUnderground();
+            } else {
+                updateUndergroundQueen();
+            }
             updateUndergroundCamera();
             drawUnderground();
         } else {
             // Oberflaechenlogik
-            updateQueen();
+            if (state.playerWorker.active) {
+                updatePlayerWorker();
+            } else {
+                updateQueen();
+            }
             updateCamera();
-            // Zoom anwenden fuer Spielwelt
             ctx.save();
             ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
             drawGrass();
@@ -1894,11 +2282,14 @@
             drawDroppedLeaves();
             drawTargetMarker();
             drawWorkersOverworld();
-            drawQueen();
+            if (state.playerWorker.active) {
+                drawPlayerWorker();
+            } else {
+                drawQueen();
+            }
             drawDigIndicator();
             ctx.restore();
 
-            // Minimap ohne Zoom zeichnen
             drawMinimap();
         }
 
