@@ -45,6 +45,7 @@
         // Brut-System
         EGG_INTERVAL: 1200,        // Frames zwischen Eiern (20 Sekunden bei 60fps)
         MAX_EGGS: 10,              // Maximale Anzahl Eier
+        FOOD_CONSUME_DELAY: 600,   // Frames bis Futter verbraucht wird (10 Sekunden bei 60fps)
         EGG_SIZE: 50,              // Anzeige-Groesse eines Eis
         PUPA_SIZE: 60,             // Anzeige-Groesse einer Puppe
         WORKER_SIZE: 64,           // Anzeige-Groesse einer Arbeiter-Ameise (kleiner als Koenigin)
@@ -197,18 +198,20 @@
 
     async function loadAssets() {
         try {
-            const [grass, queen, hole, underground, leaf] = await Promise.all([
+            const [grass, queen, hole, underground, leaf, queen_wingless] = await Promise.all([
                 loadImage('assets/images/grass.png'),
                 loadImage('assets/images/queen.png'),
                 loadImage('assets/images/hole.png'),
                 loadImage('assets/images/underground.png'),
                 loadImage('assets/images/leaf.png'),
+                loadImage('assets/images/queen_wingless.png'),
             ]);
             state.images.grass = grass;
             state.images.queen = queen;
             state.images.hole = hole;
             state.images.underground = underground;
             state.images.leaf = leaf;
+            state.images.queen_wingless = queen_wingless;
             state.loaded = true;
             document.getElementById('loading').style.display = 'none';
 
@@ -217,9 +220,6 @@
                 .then(img => { state.images.underground_deep = img; })
                 .catch(() => { /* Datei noch nicht vorhanden - Untergrund zeigt nur den oberen Streifen */ });
             // Brut-Grafiken laden
-            loadImage('assets/images/queen_wingless.png')
-                .then(img => { state.images.queen_wingless = img; })
-                .catch(() => { /* Platzhalter: nutze queen.png */ });
             loadImage('assets/images/egg.png')
                 .then(img => { state.images.egg = img; })
                 .catch(() => { });
@@ -1846,29 +1846,41 @@
             }
         }
 
-        // Entwicklung: Futter im Untergrund verbrauchen
-        // Ei -> Puppe (braucht 1 Futter)
-        if (b.eggs.length > 0 && u.droppedLeaves.length > 0) {
-            const egg = b.eggs.shift();
-            u.droppedLeaves.shift(); // Futter verbrauchen
-            b.pupae.push({ x: egg.x, y: egg.y });
-        }
-
-        // Puppe -> Arbeiter-Ameise (braucht 1 Futter)
-        if (b.pupae.length > 0 && u.droppedLeaves.length > 0) {
-            const pupa = b.pupae.shift();
-            u.droppedLeaves.shift(); // Futter verbrauchen
-            b.workers.push({
-                x: pupa.x, y: pupa.y,
-                angle: Math.random() * Math.PI * 2,
-                surfaceX: state.queen.x, surfaceY: state.queen.y,
-                state: 'underground_idle', // underground_idle -> going_exit -> surface_to_food -> surface_to_hole -> underground_to_drop -> underground_idle (Zyklus)
-                carrying: false,
-                underground: true,
-                path: [],
-                moving: false,
-                targetX: null, targetY: null,
-            });
+        // Entwicklung: Futter im Untergrund verbrauchen (mit 10-Sekunden-Verzögerung)
+        // Jedes abgelegte Blatt bekommt einen Timer; nach Ablauf wird es verbraucht
+        for (let i = u.droppedLeaves.length - 1; i >= 0; i--) {
+            const dl = u.droppedLeaves[i];
+            // Timer initialisieren falls noch nicht vorhanden
+            if (dl.consumeTimer === undefined) dl.consumeTimer = CONFIG.FOOD_CONSUME_DELAY;
+            // Nur herunterzaehlen wenn es Brut gibt die sich entwickeln kann
+            if (b.eggs.length > 0 || b.pupae.length > 0) {
+                dl.consumeTimer--;
+                if (dl.consumeTimer <= 0) {
+                    // Blatt verbrauchen
+                    u.droppedLeaves.splice(i, 1);
+                    // Zuerst Ei -> Puppe pruefen
+                    if (b.eggs.length > 0) {
+                        const egg = b.eggs.shift();
+                        b.pupae.push({ x: egg.x, y: egg.y });
+                    }
+                    // Sonst Puppe -> Arbeiter
+                    else if (b.pupae.length > 0) {
+                        const pupa = b.pupae.shift();
+                        b.workers.push({
+                            x: pupa.x, y: pupa.y,
+                            angle: Math.random() * Math.PI * 2,
+                            surfaceX: state.queen.x, surfaceY: state.queen.y,
+                            state: 'underground_idle',
+                            carrying: false,
+                            underground: true,
+                            path: [],
+                            moving: false,
+                            targetX: null, targetY: null,
+                        });
+                    }
+                    break; // Pro Frame nur ein Blatt verbrauchen
+                }
+            }
         }
     }
 
