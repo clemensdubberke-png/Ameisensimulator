@@ -521,11 +521,18 @@
                         if (dropPath) {
                             setUgPath(dropPath, false, true);
                         } else {
-                            u.droppedLeaves.push({ x: qx, y: qy, angle: Math.random() * Math.PI * 2 });
+                            // Sofort vor dem Kopf ablegen
+                            const qAngle = isPW ? pw.ugAngle : u.queenAngle;
+                            const qSize = isPW ? CONFIG.WORKER_SIZE : CONFIG.QUEEN_SIZE;
+                            const dDist = qSize * 0.85;
+                            u.droppedLeaves.push({ x: qx + Math.cos(qAngle) * dDist, y: qy + Math.sin(qAngle) * dDist, angle: Math.random() * Math.PI * 2 });
                             if (isPW) pw.ugCarrying = false; else u.carrying = false;
                         }
                     } else {
-                        u.droppedLeaves.push({ x: qx, y: qy, angle: Math.random() * Math.PI * 2 });
+                        const qAngle = isPW ? pw.ugAngle : u.queenAngle;
+                        const qSize = isPW ? CONFIG.WORKER_SIZE : CONFIG.QUEEN_SIZE;
+                        const dDist = qSize * 0.85;
+                        u.droppedLeaves.push({ x: qx + Math.cos(qAngle) * dDist, y: qy + Math.sin(qAngle) * dDist, angle: Math.random() * Math.PI * 2 });
                         if (isPW) pw.ugCarrying = false; else u.carrying = false;
                     }
                     return;
@@ -1049,11 +1056,14 @@
                 }
                 q._pickDroppedIdx = -1;
             }
-            // Wenn Ameise an Ablage-Stelle angekommen -> Blatt ablegen
+            // Wenn Ameise an Ablage-Stelle angekommen -> Blatt vor dem Kopf ablegen
             if (q.goingToDrop) {
                 q.goingToDrop = false;
                 if (q.carrying) {
-                    state.droppedLeaves.push({ x: q.x, y: q.y, angle: Math.random() * Math.PI * 2 });
+                    const dropDist = CONFIG.QUEEN_SIZE * 0.85;
+                    const dropX = q.x + Math.cos(q.angle) * dropDist;
+                    const dropY = q.y + Math.sin(q.angle) * dropDist;
+                    state.droppedLeaves.push({ x: dropX, y: dropY, angle: Math.random() * Math.PI * 2 });
                     q.carrying = false;
                 }
             }
@@ -1096,11 +1106,14 @@
                     u.currentDig = null;
                 }
                 u.moving = false;
-                // Blatt im Untergrund ablegen
+                // Blatt im Untergrund vor dem Kopf ablegen
                 if (u.goingToDrop) {
                     u.goingToDrop = false;
                     if (u.carrying) {
-                        u.droppedLeaves.push({ x: u.queenX, y: u.queenY, angle: Math.random() * Math.PI * 2 });
+                        const dropDist = CONFIG.QUEEN_SIZE * 0.85;
+                        const dropX = u.queenX + Math.cos(u.queenAngle) * dropDist;
+                        const dropY = u.queenY + Math.sin(u.queenAngle) * dropDist;
+                        u.droppedLeaves.push({ x: dropX, y: dropY, angle: Math.random() * Math.PI * 2 });
                         u.carrying = false;
                     }
                 }
@@ -1213,11 +1226,14 @@
                 }
                 pw._pickDroppedIdx = -1;
             }
-            // Blatt ablegen
+            // Blatt vor dem Kopf ablegen
             if (pw.goingToDrop) {
                 pw.goingToDrop = false;
                 if (pw.carrying) {
-                    state.droppedLeaves.push({ x: pw.x, y: pw.y, angle: Math.random() * Math.PI * 2 });
+                    const dropDist = CONFIG.WORKER_SIZE * 0.85;
+                    const dropX = pw.x + Math.cos(pw.angle) * dropDist;
+                    const dropY = pw.y + Math.sin(pw.angle) * dropDist;
+                    state.droppedLeaves.push({ x: dropX, y: dropY, angle: Math.random() * Math.PI * 2 });
                     pw.carrying = false;
                 }
             }
@@ -1255,11 +1271,14 @@
                     pw.ugCurrentDig = null;
                 }
                 pw.ugMoving = false;
-                // Blatt ablegen
+                // Blatt vor dem Kopf ablegen
                 if (pw.ugGoingToDrop) {
                     pw.ugGoingToDrop = false;
                     if (pw.ugCarrying) {
-                        u.droppedLeaves.push({ x: pw.ugX, y: pw.ugY, angle: Math.random() * Math.PI * 2 });
+                        const dropDist = CONFIG.WORKER_SIZE * 0.85;
+                        const dropX = pw.ugX + Math.cos(pw.ugAngle) * dropDist;
+                        const dropY = pw.ugY + Math.sin(pw.ugAngle) * dropDist;
+                        u.droppedLeaves.push({ x: dropX, y: dropY, angle: Math.random() * Math.PI * 2 });
                         pw.ugCarrying = false;
                     }
                 }
@@ -1837,9 +1856,19 @@
         // Koenigin legt Eier (wenn im Untergrund aktiv, oder wenn KI-Koenigin nach Spieler-Arbeiter-Aktivierung)
         if (state.playerWorker.active || u.active) {
             b.eggTimer--;
-            if (b.eggTimer <= 0 && (b.eggs.length + b.pupae.length + b.workers.length) < CONFIG.MAX_EGGS) {
-                // Ei direkt bei der Koenigin ablegen
-                b.eggs.push({ x: u.queenX + (Math.random() - 0.5) * 40, y: u.queenY + (Math.random() - 0.5) * 40 });
+            if (b.eggTimer <= 0 && b.eggs.length < CONFIG.MAX_EGGS) {
+                // Ei direkt hinter dem Hinterteil der Koenigin ablegen
+                const eggDist = CONFIG.QUEEN_SIZE * 0.9; // Abstand hinter dem Hinterteil
+                const eggX = u.queenX - Math.cos(u.queenAngle) * eggDist;
+                const eggY = u.queenY - Math.sin(u.queenAngle) * eggDist;
+                b.eggs.push({ x: eggX, y: eggY });
+                // Koenigin bewegt sich ein kleines Stueck nach vorne
+                const stepDist = CONFIG.QUEEN_SIZE * 0.5;
+                u.queenX += Math.cos(u.queenAngle) * stepDist;
+                u.queenY += Math.sin(u.queenAngle) * stepDist;
+                // Weltgrenzen einhalten
+                u.queenX = Math.max(CONFIG.QUEEN_SIZE / 2, Math.min(u.queenX, CONFIG.UNDERGROUND_WIDTH - CONFIG.QUEEN_SIZE / 2));
+                u.queenY = Math.max(u.exitY, Math.min(u.queenY, CONFIG.UNDERGROUND_HEIGHT - CONFIG.QUEEN_SIZE / 2));
                 b.eggTimer = CONFIG.EGG_INTERVAL;
             } else if (b.eggTimer <= 0) {
                 b.eggTimer = CONFIG.EGG_INTERVAL; // Reset auch wenn max erreicht
@@ -1847,8 +1876,8 @@
         }
 
         // Entwicklung: Futter im Untergrund verbrauchen (mit 10-Sekunden-Verzögerung)
-        // Jedes abgelegte Blatt bekommt einen Timer; nach Ablauf wird es verbraucht
-        for (let i = u.droppedLeaves.length - 1; i >= 0; i--) {
+        // Aeltestes Blatt (erstes in der Liste) wird zuerst verbraucht -> FIFO
+        for (let i = 0; i < u.droppedLeaves.length; i++) {
             const dl = u.droppedLeaves[i];
             // Timer initialisieren falls noch nicht vorhanden
             if (dl.consumeTimer === undefined) dl.consumeTimer = CONFIG.FOOD_CONSUME_DELAY;
