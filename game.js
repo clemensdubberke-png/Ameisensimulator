@@ -30,6 +30,12 @@
 
         // Zoom-Stufe (1 = kein Zoom, 2 = doppelt so nah)
         ZOOM: 2,
+
+        // Untergrund-Welt
+        UNDERGROUND_WIDTH: 3000,   // Breite der Untergrund-Welt in Pixeln
+        UNDERGROUND_HEIGHT: 3000,  // Tiefe der Untergrund-Welt in Pixeln
+        UNDERGROUND_TOP_HEIGHT: 350, // Hoehe des oberen Streifens (underground.png)
+        TUNNEL_RADIUS: 50,         // Halbe Breite eines Gangs in Welt-Pixeln
     };
 
     // --- Canvas Setup ---
@@ -59,8 +65,24 @@
             digTimer: 0, // Verbleibende Frames fuer Graben
             digX: null, // Zielposition zum Graben
             digY: null,
+            goingToHole: false, // Laeuft zu einem fertigen Loch um hineinzugehen
         },
         holes: [], // Array von {x, y} - gegrabene Loecher
+        underground: {
+            active: false,
+            camX: 0, camY: 0,
+            queenX: 1500, queenY: 162,  // Ameisenposition im Untergrund
+            queenAngle: Math.PI / 2,
+            path: [],                   // Wegpunkte fuer Bewegung: [{x,y}] (Wegfindung)
+            moving: false,
+            exitX: 1500, exitY: 100,    // Hoehleneingang-Position (tief in der Erde)
+            goingToExit: false,
+            tunnels: [],               // Gegrabene Gaenge: [{x1,y1,x2,y2}]
+            currentDig: null,          // Aktuell gegrabener Gang: {x1,y1} (Endpunkt = Ameisenpos.)
+            lastTapTime: 0,            // Doppelklick-Erkennung im Untergrund
+            lastTapX: 0,
+            lastTapY: 0,
+        }, // Untergrund-Ansicht
         doubleTap: {
             lastTime: 0, // Zeitpunkt des letzten Taps
             lastX: 0, // Welt-X des letzten Taps
@@ -93,25 +115,48 @@
 
     async function loadAssets() {
         try {
-            const [grass, queen, hole] = await Promise.all([
+            const [grass, queen, hole, underground] = await Promise.all([
                 loadImage('assets/images/grass.png'),
                 loadImage('assets/images/queen.png'),
                 loadImage('assets/images/hole.png'),
+                loadImage('assets/images/underground.png'),
             ]);
             state.images.grass = grass;
             state.images.queen = queen;
             state.images.hole = hole;
+            state.images.underground = underground;
             state.loaded = true;
             document.getElementById('loading').style.display = 'none';
+
+            // Optional: Tiefes Erdreich laden (wird benoetigt sobald underground_deep.png hochgeladen ist)
+            loadImage('assets/images/underground_deep.png')
+                .then(img => { state.images.underground_deep = img; })
+                .catch(() => { /* Datei noch nicht vorhanden - Untergrund zeigt nur den oberen Streifen */ });
         } catch (e) {
             document.getElementById('loading').innerHTML =
                 '<div style="text-align:center;padding:20px;">' +
                 '<p style="color:#ff6b6b;margin-bottom:12px;">Fehler beim Laden der Grafiken!</p>' +
-                '<p style="font-size:14px;">Bitte stelle sicher, dass folgende Dateien vorhanden sind:</p>' +
-                '<p style="font-size:14px;margin-top:8px;color:#ffcc00;">assets/images/grass.png</p>' +
-                '<p style="font-size:14px;color:#ffcc00;">assets/images/queen.png</p>' +
-                '<p style="font-size:14px;color:#ffcc00;">assets/images/hole.png</p>' +
+                '<p style="font-size:13px;color:#aaa;margin-bottom:16px;">' + e.message + '</p>' +
+                '<button id="clearCacheBtn" style="background:#4a7a2a;color:#fff;border:none;' +
+                'padding:12px 24px;font-size:15px;border-radius:6px;cursor:pointer;">' +
+                'Cache leeren &amp; neu laden</button>' +
                 '</div>';
+            document.getElementById('clearCacheBtn').addEventListener('click', function () {
+                if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.getRegistrations().then(function (regs) {
+                        var deletes = regs.map(function (r) { return r.unregister(); });
+                        return Promise.all(deletes);
+                    }).then(function () {
+                        return caches.keys();
+                    }).then(function (keys) {
+                        return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                    }).then(function () {
+                        location.reload(true);
+                    });
+                } else {
+                    location.reload(true);
+                }
+            });
             console.error(e);
         }
     }
@@ -133,8 +178,230 @@
         state.camera.y = Math.max(0, Math.min(state.camera.y, CONFIG.WORLD_HEIGHT - viewH));
     }
 
+    // --- Hilfsfunktion: Naechster Punkt auf dem Tunnel-Netzwerk ---
+    function closestPointOnTunnels(px, py, tunnels) {
+        let bestX = px, bestY = py, bestDist = Infinity;
+        for (let i = 0; i < tunnels.length; i++) {
+            const seg = tunnels[i];
+            const dx = seg.x2 - seg.x1;
+            const dy = seg.y2 - seg.y1;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq === 0) continue;
+            let t = ((px - seg.x1) * dx + (py - seg.y1) * dy) / lenSq;
+            t = Math.max(0, Math.min(1, t));
+            const cx = seg.x1 + t * dx;
+            const cy = seg.y1 + t * dy;
+            const dist = Math.sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestX = cx;
+                bestY = cy;
+            }
+        }
+        return {x: bestX, y: bestY, dist: bestDist};
+    }
+
+    // --- Wegfindung durch den Tunnel-Graphen (Dijkstra) ---
+    function findTunnelPath(fromX, fromY, toX, toY, tunnels) {
+        const SNAP_SQ = 100; // Knotenabgleich-Toleranz: (10 Welt-Pixel)^2
+
+        // --- Phase 1: Knoten sammeln ---
+        const nodes = []; // [{x, y}]
+        function getOrAddNode(x, y) {
+            for (let i = 0; i < nodes.length; i++) {
+                const ddx = nodes[i].x - x, ddy = nodes[i].y - y;
+                if (ddx * ddx + ddy * ddy < SNAP_SQ) return i;
+            }
+            nodes.push({x, y});
+            return nodes.length - 1;
+        }
+
+        const segEnds = []; // [i1, i2] fuer jedes Tunnel-Segment
+        for (const seg of tunnels) {
+            segEnds.push([getOrAddNode(seg.x1, seg.y1), getOrAddNode(seg.x2, seg.y2)]);
+        }
+        const startId = getOrAddNode(fromX, fromY);
+        const endId   = getOrAddNode(toX,   toY);
+
+        if (startId === endId) return [{x: nodes[endId].x, y: nodes[endId].y}];
+
+        // --- Phase 2: Adjazenzliste aufbauen ---
+        const adj = [];
+        for (let i = 0; i < nodes.length; i++) adj.push([]);
+
+        function addEdge(a, b) {
+            if (a === b) return;
+            const ddx = nodes[a].x - nodes[b].x, ddy = nodes[a].y - nodes[b].y;
+            const d = Math.sqrt(ddx * ddx + ddy * ddy);
+            if (d < 0.5) return;
+            adj[a].push({to: b, d});
+            adj[b].push({to: a, d});
+        }
+
+        // Kanten zwischen Segment-Endpunkten
+        for (const [i1, i2] of segEnds) addEdge(i1, i2);
+
+        // Knoten mit den Segmenten verbinden, auf denen er liegt
+        function connectToSegments(nodeId, px, py) {
+            for (let si = 0; si < tunnels.length; si++) {
+                const seg = tunnels[si];
+                const sdx = seg.x2 - seg.x1, sdy = seg.y2 - seg.y1;
+                const lenSq = sdx * sdx + sdy * sdy;
+                if (lenSq < 1) continue;
+                let t = ((px - seg.x1) * sdx + (py - seg.y1) * sdy) / lenSq;
+                t = Math.max(0, Math.min(1, t));
+                const cx = seg.x1 + t * sdx, cy = seg.y1 + t * sdy;
+                if ((px - cx) * (px - cx) + (py - cy) * (py - cy) > SNAP_SQ * 9) continue;
+                const [i1, i2] = segEnds[si];
+                addEdge(nodeId, i1);
+                addEdge(nodeId, i2);
+            }
+        }
+        connectToSegments(startId, fromX, fromY);
+        connectToSegments(endId,   toX,   toY);
+
+        // Direkte Kante wenn Start und Ziel auf demselben Segment liegen
+        for (let si = 0; si < tunnels.length; si++) {
+            const seg = tunnels[si];
+            const sdx = seg.x2 - seg.x1, sdy = seg.y2 - seg.y1;
+            const lenSq = sdx * sdx + sdy * sdy;
+            if (lenSq < 1) continue;
+            const check = (px, py) => {
+                let t = ((px - seg.x1) * sdx + (py - seg.y1) * sdy) / lenSq;
+                t = Math.max(0, Math.min(1, t));
+                const cx = seg.x1 + t * sdx, cy = seg.y1 + t * sdy;
+                return (px - cx) * (px - cx) + (py - cy) * (py - cy) <= SNAP_SQ * 9;
+            };
+            if (check(fromX, fromY) && check(toX, toY)) {
+                addEdge(startId, endId);
+                break;
+            }
+        }
+
+        // --- Phase 3: Dijkstra ---
+        const n = nodes.length;
+        const dists = new Array(n).fill(Infinity);
+        const prev  = new Array(n).fill(-1);
+        const done  = new Array(n).fill(false);
+        dists[startId] = 0;
+        const pq = [{id: startId, d: 0}];
+
+        while (pq.length > 0) {
+            let mi = 0;
+            for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i;
+            const {id: u} = pq[mi];
+            pq.splice(mi, 1);
+            if (done[u]) continue;
+            done[u] = true;
+            if (u === endId) break;
+            for (const {to, d: ed} of adj[u]) {
+                if (done[to]) continue;
+                const nd = dists[u] + ed;
+                if (nd < dists[to]) {
+                    dists[to] = nd;
+                    prev[to] = u;
+                    pq.push({id: to, d: nd});
+                }
+            }
+        }
+
+        if (dists[endId] === Infinity) return null; // kein Pfad gefunden
+
+        // --- Pfad rekonstruieren (ohne Startknoten) ---
+        const path = [];
+        let cur = endId;
+        while (cur !== -1 && cur !== startId) {
+            path.unshift({x: nodes[cur].x, y: nodes[cur].y});
+            cur = prev[cur];
+        }
+        return path.length > 0 ? path : [{x: toX, y: toY}];
+    }
+
     // --- Tap-Verarbeitung (Einzelklick vs. Doppelklick) ---
     function handleTap(worldX, worldY) {
+        // Untergrund-Ansicht: Ameise steuern, Gaenge graben, Ausgang benutzen
+        if (state.underground.active) {
+            const u = state.underground;
+
+            // Ausgang antippen -> laufendes Graben abschliessen + Wegfindung zum Ausgang
+            const dxExit = worldX - u.exitX;
+            const dyExit = worldY - u.exitY;
+            if (Math.sqrt(dxExit * dxExit + dyExit * dyExit) < 90) {
+                if (u.currentDig) {
+                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                    u.currentDig = null;
+                }
+                const exitTarget = {x: u.exitX, y: u.exitY + 15};
+                const exitPath = findTunnelPath(u.queenX, u.queenY, exitTarget.x, exitTarget.y, u.tunnels);
+                u.path = exitPath || [exitTarget];
+                u.moving = true;
+                u.goingToExit = true;
+                u.lastTapTime = 0;
+                return;
+            }
+
+            // Doppelklick-Erkennung
+            const now = Date.now();
+            const dt = now - u.lastTapTime;
+            const tapDx = worldX - u.lastTapX;
+            const tapDy = worldY - u.lastTapY;
+            const tapDist = Math.sqrt(tapDx * tapDx + tapDy * tapDy);
+
+            if (dt < CONFIG.DOUBLE_TAP_DELAY && tapDist < CONFIG.DOUBLE_TAP_RADIUS) {
+                // Doppelklick: laufendes Graben abschliessen, neues Graben in gerader Linie starten
+                if (u.currentDig) {
+                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                }
+                u.lastTapTime = 0;
+                const tx = Math.max(0, Math.min(worldX, CONFIG.UNDERGROUND_WIDTH));
+                const ty = Math.max(u.exitY, Math.min(worldY, CONFIG.UNDERGROUND_HEIGHT));
+                u.currentDig = {x1: u.queenX, y1: u.queenY};
+                u.path = [{x: tx, y: ty}]; // Graben: immer gerade Linie zum Ziel
+                u.moving = true;
+                u.goingToExit = false;
+            } else {
+                // Einfacher Tap: Wegfindung durch bestehende Gaenge
+                u.lastTapTime = now;
+                u.lastTapX = worldX;
+                u.lastTapY = worldY;
+                if (u.currentDig) {
+                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                    u.currentDig = null;
+                }
+                const cp = closestPointOnTunnels(worldX, worldY, u.tunnels);
+                if (cp.dist <= CONFIG.TUNNEL_RADIUS * 2.5) {
+                    const newPath = findTunnelPath(u.queenX, u.queenY, cp.x, cp.y, u.tunnels);
+                    if (newPath) {
+                        u.path = newPath;
+                        u.moving = true;
+                        u.goingToExit = false;
+                    }
+                }
+                // Tap ausserhalb aller Gaenge: ignorieren
+            }
+            return;
+        }
+
+        // Pruefen ob auf ein fertiges Loch geklickt wurde
+        const holeRadius = CONFIG.HOLE_SIZE / 2;
+        for (let i = 0; i < state.holes.length; i++) {
+            const h = state.holes[i];
+            const dx = worldX - h.x;
+            const dy = worldY - h.y;
+            if (Math.sqrt(dx * dx + dy * dy) <= holeRadius) {
+                // Klick auf Loch -> Ameise zum Loch schicken
+                state.queen.targetX = h.x;
+                state.queen.targetY = h.y;
+                state.queen.moving = true;
+                state.queen.digging = false;
+                state.queen.digX = null;
+                state.queen.digY = null;
+                state.queen.goingToHole = true;
+                state.doubleTap.lastTime = 0; // Kein Doppel-Tap-Graben auf Loecher
+                return;
+            }
+        }
+
         const now = Date.now();
         const dt = now - state.doubleTap.lastTime;
         const dx = worldX - state.doubleTap.lastX;
@@ -157,6 +424,7 @@
             state.queen.digging = false;
             state.queen.digX = null;
             state.queen.digY = null;
+            state.queen.goingToHole = false;
         }
     }
 
@@ -196,8 +464,9 @@
         state.touch.currentX = scaled.x;
         state.touch.currentY = scaled.y;
         state.touch.isDragging = false;
-        state.touch.cameraStartX = state.camera.x;
-        state.touch.cameraStartY = state.camera.y;
+        // Je nach Ansicht den richtigen Kamera-Startpunkt merken
+        state.touch.cameraStartX = state.underground.active ? state.underground.camX : state.camera.x;
+        state.touch.cameraStartY = state.underground.active ? state.underground.camY : state.camera.y;
     }, { passive: false });
 
     canvas.addEventListener('touchmove', (e) => {
@@ -219,9 +488,13 @@
 
         if (dist > CONFIG.TAP_THRESHOLD) {
             state.touch.isDragging = true;
-            // Kamera verschieben (entgegengesetzte Richtung zum Finger, Zoom beruecksichtigen)
-            state.camera.x = state.touch.cameraStartX - dx / CONFIG.ZOOM;
-            state.camera.y = state.touch.cameraStartY - dy / CONFIG.ZOOM;
+            if (state.underground.active) {
+                state.underground.camX = state.touch.cameraStartX - dx / CONFIG.ZOOM;
+                state.underground.camY = state.touch.cameraStartY - dy / CONFIG.ZOOM;
+            } else {
+                state.camera.x = state.touch.cameraStartX - dx / CONFIG.ZOOM;
+                state.camera.y = state.touch.cameraStartY - dy / CONFIG.ZOOM;
+            }
         }
     }, { passive: false });
 
@@ -236,8 +509,14 @@
 
         // Wenn es kein Drag war -> Tap verarbeiten (Einzel- oder Doppeltap)
         if (!state.touch.isDragging) {
-            const worldX = scaled.x / CONFIG.ZOOM + state.camera.x;
-            const worldY = scaled.y / CONFIG.ZOOM + state.camera.y;
+            let worldX, worldY;
+            if (state.underground.active) {
+                worldX = scaled.x / CONFIG.ZOOM + state.underground.camX;
+                worldY = scaled.y / CONFIG.ZOOM + state.underground.camY;
+            } else {
+                worldX = scaled.x / CONFIG.ZOOM + state.camera.x;
+                worldY = scaled.y / CONFIG.ZOOM + state.camera.y;
+            }
             handleTap(worldX, worldY);
         }
 
@@ -264,8 +543,8 @@
         mouseStartX = e.clientX * window.devicePixelRatio;
         mouseStartY = e.clientY * window.devicePixelRatio;
         mouseDragging = false;
-        mouseCamStartX = state.camera.x;
-        mouseCamStartY = state.camera.y;
+        mouseCamStartX = state.underground.active ? state.underground.camX : state.camera.x;
+        mouseCamStartY = state.underground.active ? state.underground.camY : state.camera.y;
     });
 
     canvas.addEventListener('mousemove', (e) => {
@@ -278,8 +557,13 @@
 
         if (dist > CONFIG.TAP_THRESHOLD) {
             mouseDragging = true;
-            state.camera.x = mouseCamStartX - dx / CONFIG.ZOOM;
-            state.camera.y = mouseCamStartY - dy / CONFIG.ZOOM;
+            if (state.underground.active) {
+                state.underground.camX = mouseCamStartX - dx / CONFIG.ZOOM;
+                state.underground.camY = mouseCamStartY - dy / CONFIG.ZOOM;
+            } else {
+                state.camera.x = mouseCamStartX - dx / CONFIG.ZOOM;
+                state.camera.y = mouseCamStartY - dy / CONFIG.ZOOM;
+            }
         }
     });
 
@@ -287,8 +571,14 @@
         if (!mouseDragging) {
             const mx = e.clientX * window.devicePixelRatio;
             const my = e.clientY * window.devicePixelRatio;
-            const worldX = mx / CONFIG.ZOOM + state.camera.x;
-            const worldY = my / CONFIG.ZOOM + state.camera.y;
+            let worldX, worldY;
+            if (state.underground.active) {
+                worldX = mx / CONFIG.ZOOM + state.underground.camX;
+                worldY = my / CONFIG.ZOOM + state.underground.camY;
+            } else {
+                worldX = mx / CONFIG.ZOOM + state.camera.x;
+                worldY = my / CONFIG.ZOOM + state.camera.y;
+            }
             handleTap(worldX, worldY);
         }
         mouseDown = false;
@@ -326,6 +616,41 @@
             if (q.digging) {
                 q.digTimer = CONFIG.DIG_DURATION;
             }
+            // Wenn Ameise am Loch angekommen -> Untergrund-Ansicht aktivieren
+            if (q.goingToHole) {
+                q.goingToHole = false;
+                const u = state.underground;
+                // Ausgang-X proportional zur Loch-Position auf der Oberflaeche
+                const exitX = q.x * (CONFIG.UNDERGROUND_WIDTH / CONFIG.WORLD_WIDTH);
+                u.exitX = Math.max(CONFIG.QUEEN_SIZE, Math.min(exitX, CONFIG.UNDERGROUND_WIDTH - CONFIG.QUEEN_SIZE));
+                u.exitY = 100; // tiefer in der Erdschicht als die Rasenkante
+                // Ameise startet knapp unterhalb des Hoehleneingangs (gerade eingetreten)
+                u.queenX = u.exitX;
+                u.queenY = u.exitY + 62; // direkt unter dem Ausgangsoval
+                u.queenAngle = Math.PI / 2; // schaut nach unten
+                u.path = [];
+                u.moving = false;
+                u.goingToExit = false;
+                // Eingangs-Gang: senkrecht von Ausgangsoval bis zur Startposition der Ameise
+                // Beim ersten Betreten: Tunnel-Array initialisieren
+                // Bei erneutem Betreten: bestehende Gaenge beibehalten, nur Eingangs-Gang aktualisieren
+                if (u.tunnels.length === 0) {
+                    u.tunnels = [{x1: u.exitX, y1: u.exitY, x2: u.exitX, y2: u.queenY}];
+                } else {
+                    // Eingangs-Gang (erster Tunnel) auf neue Position aktualisieren
+                    u.tunnels[0] = {x1: u.exitX, y1: u.exitY, x2: u.exitX, y2: u.queenY};
+                }
+                u.currentDig = null;
+                u.lastTapTime = 0;
+                u.lastTapX = 0;
+                u.lastTapY = 0;
+                // Kamera so setzen, dass Eingang und Ameise sichtbar sind
+                const viewW = canvas.width / CONFIG.ZOOM;
+                const viewH = canvas.height / CONFIG.ZOOM;
+                u.camX = Math.max(0, Math.min(u.exitX - viewW / 2, CONFIG.UNDERGROUND_WIDTH - viewW));
+                u.camY = 0;
+                u.active = true;
+            }
             return;
         }
 
@@ -340,6 +665,46 @@
         // Weltgrenzen
         q.x = Math.max(CONFIG.QUEEN_SIZE / 2, Math.min(q.x, CONFIG.WORLD_WIDTH - CONFIG.QUEEN_SIZE / 2));
         q.y = Math.max(CONFIG.QUEEN_SIZE / 2, Math.min(q.y, CONFIG.WORLD_HEIGHT - CONFIG.QUEEN_SIZE / 2));
+    }
+
+    // --- Ameisen-Logik im Untergrund ---
+    function updateUndergroundQueen() {
+        const u = state.underground;
+        if (!u.moving || u.path.length === 0) return;
+
+        const wp = u.path[0]; // aktueller Wegpunkt
+        const dx = wp.x - u.queenX;
+        const dy = wp.y - u.queenY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < CONFIG.MOVE_DEAD_ZONE) {
+            // Auf Wegpunkt einrasten und zum naechsten weitergehen
+            u.queenX = wp.x;
+            u.queenY = wp.y;
+            u.path.shift();
+
+            if (u.path.length === 0) {
+                // Alle Wegpunkte abgearbeitet -> Ziel erreicht
+                if (u.currentDig) {
+                    u.tunnels.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+                    u.currentDig = null;
+                }
+                u.moving = false;
+                if (u.goingToExit) {
+                    u.goingToExit = false;
+                    u.active = false; // Zurueck zur Oberflaechenansicht
+                }
+            }
+            return;
+        }
+
+        u.queenAngle = Math.atan2(dy, dx);
+        u.queenX += (dx / dist) * CONFIG.QUEEN_SPEED;
+        u.queenY += (dy / dist) * CONFIG.QUEEN_SPEED;
+
+        // Weltgrenzen
+        u.queenX = Math.max(CONFIG.QUEEN_SIZE / 2, Math.min(u.queenX, CONFIG.UNDERGROUND_WIDTH - CONFIG.QUEEN_SIZE / 2));
+        u.queenY = Math.max(u.exitY, Math.min(u.queenY, CONFIG.UNDERGROUND_HEIGHT - CONFIG.QUEEN_SIZE / 2));
     }
 
     // --- Rendering ---
@@ -438,6 +803,193 @@
         ctx.restore();
     }
 
+    function updateUndergroundCamera() {
+        const u = state.underground;
+        const viewW = canvas.width / CONFIG.ZOOM;
+        const viewH = canvas.height / CONFIG.ZOOM;
+        // Kamera folgt der Ameise, wenn kein Drag aktiv
+        if (!state.touch.isDragging && !mouseDragging) {
+            u.camX = u.queenX - viewW / 2;
+            u.camY = u.queenY - viewH / 2;
+        }
+        u.camX = Math.max(0, Math.min(u.camX, CONFIG.UNDERGROUND_WIDTH - viewW));
+        u.camY = Math.max(0, Math.min(u.camY, CONFIG.UNDERGROUND_HEIGHT - viewH));
+    }
+
+    function drawUnderground() {
+        const u = state.underground;
+        const topImg = state.images.underground;
+        const soilImg = state.images.underground_deep;
+        const camX = u.camX;
+        const camY = u.camY;
+        const worldW = CONFIG.UNDERGROUND_WIDTH;
+        const topH = CONFIG.UNDERGROUND_TOP_HEIGHT;
+        const pulse = Math.sin(Date.now() / 420) * 0.2 + 0.8;
+
+        ctx.save();
+        ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
+
+        // Oberer Streifen: underground.png gestreckt auf volle Weltbreite
+        if (topImg) {
+            ctx.drawImage(topImg, -camX, -camY, worldW, topH);
+        }
+
+        // Darunter: underground_deep.png als Kachelwerk fuer die Tiefe
+        if (soilImg && soilImg.width > 0 && soilImg.height > 0) {
+            const tileW = soilImg.width;
+            const tileH = soilImg.height;
+            const viewW = canvas.width / CONFIG.ZOOM;
+            const viewH = canvas.height / CONFIG.ZOOM;
+            const soilCamY = camY - topH;
+            const startCol = Math.floor(camX / tileW);
+            const endCol = Math.ceil((camX + viewW) / tileW);
+            const startRow = Math.max(0, Math.floor(soilCamY / tileH));
+            const endRow = Math.ceil((soilCamY + viewH) / tileH);
+            for (let row = startRow; row <= endRow; row++) {
+                for (let col = startCol; col <= endCol; col++) {
+                    const screenX = col * tileW - camX;
+                    const screenY = topH + row * tileH - camY;
+                    ctx.drawImage(soilImg, screenX, screenY, tileW, tileH);
+                }
+            }
+        }
+
+        // --- Gaenge zeichnen (ueber Erde, unter Ameise) ---
+        // Alle Segmente: abgeschlossene Gaenge + aktuell gegrabener (waechst mit Ameise)
+        const allSegs = u.tunnels.slice();
+        if (u.currentDig) {
+            allSegs.push({x1: u.currentDig.x1, y1: u.currentDig.y1, x2: u.queenX, y2: u.queenY});
+        }
+        if (allSegs.length > 0) {
+            const r = CONFIG.TUNNEL_RADIUS;
+            ctx.save();
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            // Aeusserer Erdrand (dunklerer Rand)
+            ctx.strokeStyle = '#0e0700';
+            ctx.lineWidth = r * 2 + 8;
+            for (let i = 0; i < allSegs.length; i++) {
+                const seg = allSegs[i];
+                ctx.beginPath();
+                ctx.moveTo(seg.x1 - camX, seg.y1 - camY);
+                ctx.lineTo(seg.x2 - camX, seg.y2 - camY);
+                ctx.stroke();
+            }
+            // Tunnel-Hohlraum (dunkles Erdreich-Inneres)
+            ctx.strokeStyle = '#241005';
+            ctx.lineWidth = r * 2;
+            for (let i = 0; i < allSegs.length; i++) {
+                const seg = allSegs[i];
+                ctx.beginPath();
+                ctx.moveTo(seg.x1 - camX, seg.y1 - camY);
+                ctx.lineTo(seg.x2 - camX, seg.y2 - camY);
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
+
+        // --- Hoehleneingang (Ausgang nach oben) ---
+        const exitScrX = u.exitX - camX;
+        const exitScrY = u.exitY - camY;
+        const tunnelW = 80;
+        const tunnelH = 48;
+
+        // Lichtschein von der Oberflaeche (Tageslicht-Glow)
+        const glow = ctx.createRadialGradient(exitScrX, exitScrY, 0, exitScrX, exitScrY, 110);
+        glow.addColorStop(0, 'rgba(160, 255, 80, ' + (0.45 * pulse) + ')');
+        glow.addColorStop(0.5, 'rgba(100, 200, 40, ' + (0.2 * pulse) + ')');
+        glow.addColorStop(1, 'rgba(100, 200, 40, 0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.ellipse(exitScrX, exitScrY, 110, 90, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Dunkelheit des Tunnelinneren
+        ctx.fillStyle = '#0b0600';
+        ctx.beginPath();
+        ctx.ellipse(exitScrX, exitScrY, tunnelW / 2, tunnelH / 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Tunnel-Wand (Erdreich-Rand)
+        ctx.strokeStyle = '#7a5010';
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.ellipse(exitScrX, exitScrY, tunnelW / 2, tunnelH / 2, 0, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Helle Innenkontur (Lichtreflex)
+        ctx.strokeStyle = 'rgba(200, 160, 60, 0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.ellipse(exitScrX, exitScrY - 3, tunnelW / 2 - 4, tunnelH / 2 - 4, 0, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Pfeile nach oben neben dem Eingang
+        ctx.fillStyle = 'rgba(255, 210, 60, ' + pulse + ')';
+        ctx.beginPath();
+        // Linker Pfeil
+        ctx.moveTo(exitScrX - tunnelW / 2 - 16, exitScrY + 4);
+        ctx.lineTo(exitScrX - tunnelW / 2 - 8, exitScrY - 10);
+        ctx.lineTo(exitScrX - tunnelW / 2 - 0, exitScrY + 4);
+        ctx.closePath();
+        ctx.fill();
+        // Rechter Pfeil
+        ctx.beginPath();
+        ctx.moveTo(exitScrX + tunnelW / 2 + 0, exitScrY + 4);
+        ctx.lineTo(exitScrX + tunnelW / 2 + 8, exitScrY - 10);
+        ctx.lineTo(exitScrX + tunnelW / 2 + 16, exitScrY + 4);
+        ctx.closePath();
+        ctx.fill();
+
+        // "Ausgang"-Label in passender Schriftgroesse
+        const labelSize = Math.round(13 * window.devicePixelRatio / CONFIG.ZOOM);
+        ctx.font = 'bold ' + labelSize + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(255, 220, 60, ' + pulse + ')';
+        ctx.fillText('Ausgang', exitScrX, exitScrY + tunnelH / 2 + labelSize + 4);
+
+        // --- Zielmarkierung der Untergrund-Ameise ---
+        if (u.moving && u.targetX !== null && !u.goingToExit) {
+            const tScrX = u.targetX - camX;
+            const tScrY = u.targetY - camY;
+            const tPulse = Math.sin(Date.now() / 200) * 0.3 + 0.7;
+            ctx.save();
+            ctx.globalAlpha = tPulse * 0.5;
+            ctx.strokeStyle = '#ffcc00';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(tScrX, tScrY, 12 + tPulse * 6, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        // --- Ameise im Untergrund ---
+        const queenImg = state.images.queen;
+        if (queenImg) {
+            const scrX = u.queenX - camX;
+            const scrY = u.queenY - camY;
+            const bodyLength = CONFIG.QUEEN_SIZE * 1.5;
+            const bodyWidth = CONFIG.QUEEN_SIZE;
+            ctx.save();
+            ctx.translate(scrX, scrY);
+            ctx.rotate(u.queenAngle);
+            ctx.drawImage(queenImg, -bodyLength / 2, -bodyWidth / 2, bodyLength, bodyWidth);
+            ctx.restore();
+        }
+
+        ctx.restore(); // Ende des ZOOM-Blocks
+
+        // --- UI-Hinweis unten (in Canvas-Pixeln) ---
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(0, canvas.height - 56 * window.devicePixelRatio, canvas.width, 56 * window.devicePixelRatio);
+        ctx.fillStyle = '#ffcc00';
+        ctx.font = (13 * window.devicePixelRatio) + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('Doppeltippen: Gang graben  |  Ausgang: nach oben', canvas.width / 2, canvas.height - 18 * window.devicePixelRatio);
+        ctx.restore();
+    }
+
     function drawMinimap() {
         const mapW = 120;
         const mapH = 120;
@@ -496,25 +1048,31 @@
             return;
         }
 
-        // Logik
-        updateQueen();
-        updateCamera();
-
         // Rendern
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Zoom anwenden fuer Spielwelt
-        ctx.save();
-        ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
-        drawGrass();
-        drawHoles();
-        drawTargetMarker();
-        drawQueen();
-        drawDigIndicator();
-        ctx.restore();
+        if (state.underground.active) {
+            // Untergrund-Ansicht: Ameise bewegen, Kamera folgt
+            updateUndergroundQueen();
+            updateUndergroundCamera();
+            drawUnderground();
+        } else {
+            // Oberflaechenlogik
+            updateQueen();
+            updateCamera();
+            // Zoom anwenden fuer Spielwelt
+            ctx.save();
+            ctx.scale(CONFIG.ZOOM, CONFIG.ZOOM);
+            drawGrass();
+            drawHoles();
+            drawTargetMarker();
+            drawQueen();
+            drawDigIndicator();
+            ctx.restore();
 
-        // Minimap ohne Zoom zeichnen
-        drawMinimap();
+            // Minimap ohne Zoom zeichnen
+            drawMinimap();
+        }
 
         requestAnimationFrame(gameLoop);
     }
